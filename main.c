@@ -72,6 +72,122 @@
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
 
+#include <sys/time.h>
+
+/**
+ * tsf: convert this app to int-collector.
+ */
+
+/* do not shown dpdk configuration initialization. */
+#define CONFIG_NOT_DISPLAY
+
+/* define macro header definition. */
+#define ETH_HEADER_LEN              14
+#define IPV4_HEADER_LEN             20
+#define INT_HEADER_BASE             34
+#define INT_HEADER_TYPE_OFF         34
+#define INT_HEADER_TTL_OFF          36
+#define INT_HEADER_MAPINFO_OFF      37
+#define INT_DATA_OFF                38
+#define STORE_CNT_THRESHOLD        1000
+
+/* host-byte order <-> network-byte order. */
+#define htonll(_x)    ((1==htonl(1)) ? (_x) : \
+                           ((uint64_t) htonl(_x) << 32) | htonl(_x >> 32))
+#define ntohll(_x)    ((1==ntohl(1)) ? (_x) : \
+                           ((uint64_t) ntohl(_x) << 32) | ntohl(_x >> 32))
+
+#define Max(a, b) ((a) >= (b) ? (a) : (b))
+#define Min(a, b) ((a) <= (b) ? (a) : (b))
+#define Minus(a, b) abs(a-b)
+
+/* test packet processing performance per second. */
+#define TEST_SECOND_PERFORMANCE
+/* test the INT header. */
+#define TEST_INT_HEADER
+/* test packet write cost. */
+#define FILTER_PKTS
+
+/* define 1s in ms. */
+#define ONE_SECOND_IN_MS 1000000.0
+/* define 50ms. */
+#define FIFTY_MS         50000.0
+
+#define ERROR_THRESH 0.2   /* 20% */
+
+/* map_info + switch_id +in_port + out_port + hop_latency + ingress_time + bandwidth + relative_time + cnt. */
+static char * INT_FMT = "%x\t%u\t%u\t%u\t%u\t%llx\t%f\t%f\t%u\n";
+static char * INT_STR = "map_info\tsw\tin_port\tout_port\tdelay\ttime\tbandwidth\trelative_time\tcnt\n";
+
+/* INT Header: Metadata set. */
+typedef struct {
+    uint8_t map_info;
+//    uint16_t type;
+//    uint8_t len;   /* hops */
+
+    uint32_t switch_id;
+    uint8_t in_port;
+    uint8_t out_port;
+    uint16_t hop_latency;
+    uint64_t ingress_time;
+    float bandwidth;
+
+    uint32_t hash;           /* indicate whether to store into files. */
+} item_t;
+
+
+/* used for storing INT metadata. */
+FILE *fp;
+
+/* used to track on pkt_cnt[] */
+#define MAX_DEVICE 6
+#define MIN_PKT_LEN       60
+
+static void print_pkt(uint32_t pkt_len, uint8_t *pkt){
+    uint32_t i = 0;
+    for (i = 0; i < pkt_len; ++i) {
+        printf("%02x", i, pkt[i]);
+
+        if ((i + 1) % 8 == 0) {
+            printf(" ");   // 2 space
+        }
+
+        if ((i + 1) % 16 == 0) {
+            printf("\n");
+        }
+    }
+}
+
+static inline unsigned long long rp_get_us(void) {
+    struct timeval tv = {0};
+    gettimeofday(&tv, NULL);
+    return (unsigned long long) (tv.tv_sec * 1000000L + tv.tv_usec);
+}
+
+/* used as 'hash' condition for statistics. 'switch_id' or 'ttl' as index. */
+uint32_t his_hash[MAX_DEVICE] = {0}, hash[MAX_DEVICE] = {1, 1, 1, 1, 1, 1};
+
+/* used as 'time_flag' condition for statistics. 'switch_id' or 'ttl' as index. */
+uint16_t last_hop_latency[MAX_DEVICE] = {1, 1, 1, 1, 1, 1}, time_flag[MAX_DEVICE] = {0};
+
+/* used as 'cnt_threshold' condition for statistics. 'switch_id' or 'ttl' as index. */
+uint32_t pkt_cnt[MAX_DEVICE] = {0};
+
+/* used for performance test per second. */
+uint32_t recv_cnt = 0, sec_cnt = 0, write_cnt = 0;
+uint64_t start_time = 0, end_time = 0;
+uint64_t start_time1 = 0, end_time1 = 0;
+
+/* used for relative timestamp. */
+double relative_time = 0, delta_time = 0;        // write a record with a relative timestamp
+unsigned long long relative_start_time = 0;      // when first pkt comes in, timer runs
+bool first_pkt_in = true;                        // when first pkt comes in, turn 'false'
+
+/* used for INT item. */
+#define ITEM_SIZE 2048
+item_t int_data[ITEM_SIZE] = {0};
+float last_bd = 0;      // the last one bandwidth
+
 static volatile bool force_quit;
 
 #define RTE_LOGTYPE_L2FWD RTE_LOGTYPE_USER1
@@ -139,6 +255,9 @@ struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 /* A tsc-based timer responsible for triggering statistics printout */
 static uint64_t timer_period = 10; /* default period is 10 seconds */
 
+/* Running x second, then automatically quit. used in process_int_pkt() */
+static uint32_t timer_interval = 15;   /* default period is 15 seconds */
+
 /* Print out statistics on packets dropped */
 static void
 print_stats(void)
@@ -158,7 +277,7 @@ print_stats(void)
 
 	printf("\nPort statistics ====================================");
 
-	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
+	for (portid = 0; portid < 4; portid++) {  // tsf: limited to 4
 		/* skip disabled ports */
 		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
 			continue;
@@ -174,6 +293,14 @@ print_stats(void)
 		total_packets_dropped += port_statistics[portid].dropped;
 		total_packets_tx += port_statistics[portid].tx;
 		total_packets_rx += port_statistics[portid].rx;
+
+//		fprintf(fp, "%u\t %lu\t %lt\t %lu\t \n", portid, port_statistics[portid].tx,
+//                port_statistics[portid].rx, port_statistics[portid].dropped);
+
+		// clear, then "-T 1" is pkt/s
+        port_statistics[portid].tx = 0;
+        port_statistics[portid].rx = 0;
+        port_statistics[portid].dropped = 0;
 	}
 	printf("\nAggregate statistics ==============================="
 		   "\nTotal packets sent: %18"PRIu64
@@ -184,6 +311,290 @@ print_stats(void)
 		   total_packets_dropped);
 	printf("\n====================================================\n");
 }
+
+/* equal to rte_pktmbuf_mtod() */
+static inline void *
+dp_packet_data(const struct rte_mbuf *m)
+{
+    return m->data_off != UINT16_MAX
+           ? (uint8_t *) m->buf_addr + m->data_off : NULL;
+}
+
+static uint8_t get_set_bits_of_byte(uint8_t byte){
+    uint8_t count = 0;
+    while (byte) {
+        count += byte & 1;
+        byte >>= 1;
+    }
+    return count;
+}
+
+
+static uint32_t simple_linear_hash(item_t *item) {
+    /* hop_latency and ingress_time are volatile, do not hash them. */
+    static int prime = 31;
+    uint32_t hash = item->switch_id * prime + prime;
+    hash += item->in_port * prime;
+    hash += item->out_port * prime;
+//    hash += ((uint32_t ) item->bandwidth) * prime;
+//    hash += item->map_info * prime;
+
+    item->hash = hash;
+
+    return hash;
+}
+
+static void signal_handler(int signum);
+
+/* tsf: parse, filter and collect the INT fields. */
+static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
+    uint8_t *pkt = dp_packet_data(m);   // packet header
+    uint32_t pkt_len = m->pkt_len;      // packet len
+
+    if (pkt_len < MIN_PKT_LEN) {
+        return;
+    }
+
+    /* used to indicate where to start to parse. */
+    uint8_t pos = INT_HEADER_BASE;
+
+    /*===================== REJECT STAGE =======================*/
+#ifdef TEST_INT_HEADER
+    uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
+    uint8_t ttl = pkt[pos++];
+    if (type != 0x0908 || ttl == 0x00) {
+        return;
+    }
+#endif
+
+    /* first_int_pkt_in, init the 'relative_start_time' */
+    if (first_pkt_in) {
+        relative_start_time = rp_get_us();
+        start_time = relative_start_time;
+        first_pkt_in = false;
+        printf(INT_STR);
+    }
+
+    /* calculate the relative time. */
+    end_time = rp_get_us();
+    relative_time = (end_time - relative_start_time) / ONE_SECOND_IN_MS;  // second
+    delta_time = end_time - start_time;
+
+    bool should_write = false;
+    if (delta_time > FIFTY_MS) { // 50ms, th2
+        should_write = true;
+        start_time = end_time;
+    }
+
+    /* if map_info doesn't contaion INT data. */
+    uint8_t map_info = pkt[pos++];
+    if (get_set_bits_of_byte(map_info) == 0) {
+        return;
+    }
+
+    /*===================== PARSE STAGE =======================*/
+    uint32_t switch_id = 0x00;
+    if (map_info & 0x1) {
+        switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
+
+    }
+
+    /* WARN: if 'switch_id' is set from 1, 2 ... otherwise, use 'ttl' as index. */
+    pkt_cnt[switch_id]++;      // used for counting the records
+    recv_cnt++;                // used for how many packet processed in 1s, clear after per sec.
+
+    int int_idx = recv_cnt % ITEM_SIZE;   //  current index
+    int_data[int_idx].map_info = map_info;
+
+    if (map_info & (0x1 << 1)) {
+        int_data[int_idx].in_port = pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 2)) {
+        int_data[int_idx].out_port = pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 3)) {
+        memcpy(&(int_data[int_idx].ingress_time), &pkt[pos], 8);
+        int_data[int_idx].ingress_time = ntohll(int_data[int_idx].ingress_time);
+        pos += 8;
+    }
+
+    if (map_info & (0x1 << 4)) {
+        int_data[int_idx].hop_latency = (pkt[pos++] << 8) + pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 5)) {
+        memcpy(&(int_data[int_idx].bandwidth), &pkt[pos], 4);
+        pos += 4;
+    }
+
+    /* output how many packets we can parse in a second. */
+#ifdef TEST_SECOND_PERFORMANCE
+    if (recv_cnt == 1) {
+        start_time1 = rp_get_us();
+        sec_cnt++;
+    }
+
+    end_time1 = rp_get_us();
+
+    if (end_time1 - start_time1 >= ONE_SECOND_IN_MS) {
+        /* second + recv_pkt/s + write/s */
+        printf("%ds\t %d\t %d\n", sec_cnt, recv_cnt, write_cnt);
+        fflush(stdout);
+        recv_cnt = 0;
+        write_cnt = 0;
+        start_time1 = end_time1;
+    }
+
+    /* auto stop test. 'time_interval'=0 to disable. */
+    if (!timer_interval || (sec_cnt > timer_interval)) {  // 15s in default, -R [interval] to adjust
+        signal_handler(SIGINT);
+    }
+
+#endif
+
+#ifdef FILTER_PKTS
+    /*===================== FILTER STAGE =======================*/
+    /* we don't process no information updating packets. */
+    float delta_error = Minus(int_data[int_idx].bandwidth, last_bd) / Min(int_data[int_idx].bandwidth, last_bd);
+    last_bd = int_data[int_idx].bandwidth;
+
+    hash[switch_id] = simple_linear_hash(&int_data[int_idx]);
+
+    if ((delta_error > ERROR_THRESH) || (his_hash[switch_id] != hash[switch_id])
+        || should_write) {
+        start_time = end_time;
+    } else {
+        return;
+    }
+#endif
+
+    /* we also store cnt to show how many pkts we last stored as one record. */
+    printf(INT_FMT, int_data[int_idx].map_info, switch_id, int_data[int_idx].in_port, int_data[int_idx].out_port,
+           int_data[int_idx].hop_latency, int_data[int_idx].ingress_time, int_data[int_idx].bandwidth, relative_time, pkt_cnt[switch_id]);
+    his_hash[switch_id] = hash[switch_id];
+    pkt_cnt[switch_id] = 0;
+    write_cnt++;
+}
+
+uint16_t pkt_cnt_v2 = 0;
+static void process_int_pkt_v2(struct rte_mbuf *m, unsigned portid) {
+
+    uint8_t *pkt = dp_packet_data(m);   // packet header
+    uint32_t pkt_len = m->pkt_len;      // packet len
+
+    if (pkt_len < MIN_PKT_LEN) {
+        return;
+    }
+
+    /* INT data. */
+    uint32_t switch_id = 0x00;
+    uint8_t in_port = 0x00;
+    uint8_t out_port = 0x00;
+    uint16_t hop_latency = 0x00;
+    uint64_t ingress_time = 0x00;
+    float bandwidth = 0x00;
+
+    uint8_t default_value = 0x00;
+
+    /*===================== REJECT STAGE =======================*/
+    /* only process INT packets with TTL > 0. */
+    uint8_t pos = INT_HEADER_BASE;
+
+#ifndef TEST
+    uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
+    uint8_t ttl = pkt[pos++];
+    if (type != 0x0908 || ttl == 0x00) {
+        return;
+    }
+#endif
+
+    /*printf("process pkts: %d", pkt_cnt);*/
+
+    /* if map_info doesn't contaion INT data. */
+    uint8_t map_info = pkt[pos++];
+    if (get_set_bits_of_byte(map_info) == 0) {
+        return;
+    }
+
+    /*===================== PARSE STAGE =======================*/
+    pkt_cnt_v2++;
+    recv_cnt++;
+
+    if (map_info & 0x1) {
+        switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 1)) {
+        in_port = pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 2)) {
+        out_port = pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 3)) {
+        /*ingress_time = (pkt[pos++] << 56) + (pkt[pos++] << 48) + (pkt[pos++] << 40) + (pkt[pos++] << 32) +
+                   (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];*/
+        memcpy(&ingress_time, &pkt[pos],
+        sizeof(ingress_time));
+        ingress_time = ntohll(ingress_time);
+        pos += 8;
+    }
+
+    if (map_info & (0x1 << 4)) {
+        hop_latency = (pkt[pos++] << 8) + pkt[pos++];
+    }
+
+    if (map_info & (0x1 << 5)) {
+        memcpy(&bandwidth, &pkt[pos],
+        sizeof(bandwidth));
+        pos += 4;
+    }
+
+/*===================== STORE STAGE =======================*/
+item_t item = {
+        .switch_id = (switch_id != 0x00 ? switch_id : default_value),
+        .in_port = (in_port != 0x00 ? in_port : default_value),
+        .out_port = (out_port != 0x00 ? out_port : default_value),
+        .hop_latency = (hop_latency != 0x00 ? hop_latency : default_value),
+        .ingress_time = (ingress_time != 0x00 ? ingress_time : default_value),
+        .bandwidth = (bandwidth != 0x00 ? bandwidth : default_value),
+        .map_info = map_info,
+};
+
+#ifdef TEST_SECOND_PERFORMANCE
+    if (recv_cnt == 1) {
+        start_time = rp_get_us();
+        sec_cnt++;
+    }
+
+    end_time = rp_get_us();
+
+    if (end_time - start_time >= 1000000) {
+        printf("%d s processed %d packets/s\n", sec_cnt, recv_cnt);
+        fflush(stdout);
+        recv_cnt = 0;
+        start_time = end_time;
+    }
+#endif
+
+/*===================== FILTER STAGE =======================*/
+/* we don't process no information updating packets. */
+    if ((his_hash[0] != simple_linear_hash(&item)) || (pkt_cnt_v2 > STORE_CNT_THRESHOLD)) {
+
+    } else {
+        return;
+    }
+
+    printf(INT_FMT, item.map_info, item.switch_id, item.in_port, item.out_port,
+         item.hop_latency, item.ingress_time, item.bandwidth, 0, pkt_cnt_v2);
+
+    his_hash[0] = item.hash;
+    pkt_cnt_v2 = 0;
+}
+
 
 static void
 l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
@@ -261,9 +672,11 @@ l2fwd_main_loop(void)
 				portid = l2fwd_dst_ports[qconf->rx_port_list[i]];
 				buffer = tx_buffer[portid];
 
+#ifdef L2_FWD
 				sent = rte_eth_tx_buffer_flush(portid, 0, buffer);
 				if (sent)
 					port_statistics[portid].tx += sent;
+#endif
 
 			}
 
@@ -278,7 +691,9 @@ l2fwd_main_loop(void)
 
 					/* do this only on master core */
 					if (lcore_id == rte_get_master_lcore()) {
+#ifdef L2_FWD
 						print_stats();
+#endif
 						/* reset the timer */
 						timer_tsc = 0;
 					}
@@ -302,7 +717,12 @@ l2fwd_main_loop(void)
 			for (j = 0; j < nb_rx; j++) {
 				m = pkts_burst[j];
 				rte_prefetch0(rte_pktmbuf_mtod(m, void *));
+#ifdef L2_FWD
 				l2fwd_simple_forward(m, portid);
+#endif
+				process_int_pkt(m, portid);         // TNSM response
+//                process_int_pkt_v2(m, portid);      // first submission
+                rte_pktmbuf_free(m);   /* free the mbuf. */
 			}
 		}
 	}
@@ -322,7 +742,8 @@ l2fwd_usage(const char *prgname)
 	printf("%s [EAL options] -- -p PORTMASK [-q NQ]\n"
 	       "  -p PORTMASK: hexadecimal bitmask of ports to configure\n"
 	       "  -q NQ: number of queue (=ports) per lcore (default is 1)\n"
-		   "  -T PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 10 default, 86400 maximum)\n",
+		   "  -T PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 10 default, 86400 maximum)\n"
+           "  -R INTERVAL: running INTERVAL seconds to quit INT packet processing (0 to disable, 15 default, 86400 maximum)\n",
 	       prgname);
 }
 
@@ -377,6 +798,23 @@ l2fwd_parse_timer_period(const char *q_arg)
 	return n;
 }
 
+
+static int
+l2fwd_parse_timer_interval(const char *q_arg)
+{
+    char *end = NULL;
+    int n;
+
+    /* parse number string */
+    n = strtol(q_arg, &end, 10);
+    if ((q_arg[0] == '\0') || (end == NULL) || (*end != '\0'))
+        return -1;
+    if (n >= MAX_TIMER_PERIOD)
+        return -1;
+
+    return n;
+}
+
 /* Parse the argument given in the command line of the application */
 static int
 l2fwd_parse_args(int argc, char **argv)
@@ -391,7 +829,7 @@ l2fwd_parse_args(int argc, char **argv)
 
 	argvopt = argv;
 
-	while ((opt = getopt_long(argc, argvopt, "p:q:T:",
+	while ((opt = getopt_long(argc, argvopt, "p:q:T:R:",
 				  lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
@@ -425,6 +863,16 @@ l2fwd_parse_args(int argc, char **argv)
 			}
 			timer_period = timer_secs;
 			break;
+
+        case 'R':
+            timer_secs = l2fwd_parse_timer_interval(optarg);
+            if (timer_secs < 0) {
+                printf("invalid timer period\n");
+                l2fwd_usage(prgname);
+                return -1;
+            }
+            timer_interval = timer_secs;
+            break;
 
 		/* long options */
 		case 0:
@@ -511,6 +959,8 @@ signal_handler(int signum)
 		printf("\n\nSignal %d received, preparing to exit...\n",
 				signum);
 		force_quit = true;
+
+		fflush(stdout);
 	}
 }
 
@@ -526,6 +976,10 @@ main(int argc, char **argv)
 	unsigned lcore_id, rx_lcore_id;
 	unsigned nb_ports_in_mask = 0;
 
+//	fp = fopen("./int-collector.txt", "rw+");
+//	fprintf(fp, INT_STR);
+//	fflush(fp);
+
 	/* init EAL */
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
@@ -536,6 +990,9 @@ main(int argc, char **argv)
 	force_quit = false;
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
+
+//	fflush(fp);
+//	fclose(fp);
 
 	/* parse application arguments (after the EAL ones) */
 	ret = l2fwd_parse_args(argc, argv);
