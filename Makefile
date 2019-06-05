@@ -45,6 +45,6 @@ APP = l2fwd
 SRCS-y := main.c
 
 CFLAGS += -O3
-CFLAGS += $(WERROR_FLAGS)
+# CFLAGS += $(WERROR_FLAGS)   # avoid warning as errors
 
 include $(RTE_SDK)/mk/rte.extapp.mk
