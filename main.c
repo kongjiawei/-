@@ -352,6 +352,8 @@ static uint32_t simple_linear_hash(item_t *item) {
 
 static void signal_handler(int signum);
 
+int i;
+
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
@@ -377,7 +379,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /* first_int_pkt_in, init the 'relative_start_time' */
     if (first_pkt_in) {
         relative_start_time = rp_get_us();
-        for (int i=0; i < (MAX_DEVICE+1); i++) {
+
+        for (i=0; i < (MAX_DEVICE+1); i++) {
             start_time[i] = relative_start_time;
         }
         first_pkt_in = false;
@@ -401,7 +404,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
     /*===================== PARSE STAGE =======================*/
     uint32_t switch_id = 0x00;
-    for (int i = 1; i <= ttl; i++) {    // ttl ranges from [1, 6]
+    for (i = 1; i <= ttl; i++) {    // ttl ranges from [1, 6]
         if (map_info & 0x1) {
             switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
             sw_cnt[switch_id]++;               // clear per second
