@@ -7,7 +7,7 @@ This app targets for processing INT packets based on DPDK 16.07. It can run outs
 - Environment set
 ```
 export RTE_SDK=/path/to/rte_sdk # dpdk16.07 installation directory
-export RTE_SDK= x86_64-native-linuxapp-gcc
+export RTE_TARGET=x86_64-native-linuxapp-gcc
 ```
 
 - App compilation 
