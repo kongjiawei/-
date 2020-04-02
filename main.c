@@ -75,21 +75,46 @@
 #include <sys/time.h>
 
 /**
- * tsf: convert this app to int-collector.
+ * @author: tsf
+ * @created: 2019-06-05
+ * @modified: 2020-04-02
+ * @desc: convert this app to external DPDK-16.07-based int-collector.
  */
 
 /* do not shown dpdk configuration initialization. */
 #define CONFIG_NOT_DISPLAY
 
-/* define macro header definition. */
 #define ETH_HEADER_LEN              14
 #define IPV4_HEADER_LEN             20
+#define IPV4_SRC_BASE               26
+#define IPV4_SRC_LEN                 4
+#define IPV4_DST_BASE               26
+#define IPV4_DST_LEN                 4
+#define IPV4_IP_LEN                  8    // <src, dst>
+
 #define INT_HEADER_BASE             34
+#define INT_HEADER_LEN               4
 #define INT_HEADER_TYPE_OFF         34
+#define INT_HEADER_TYPE_LEN          2
 #define INT_HEADER_TTL_OFF          36
+#define INT_HEADER_TTL_LEN           1
 #define INT_HEADER_MAPINFO_OFF      37
-#define INT_DATA_OFF                38
-#define STORE_CNT_THRESHOLD        1000
+#define INT_HEADER_MAPINFO_LEN       2
+#define INT_HEADER_DATA_OFF         39
+
+/* tsf: INT data len. */
+#define INT_DATA_DPID_LEN            4
+#define INT_DATA_IN_PORT_LEN         2
+#define INT_DATA_OUT_PORT_LEN        2
+#define INT_DATA_INGRESS_TIME_LEN    8
+#define INT_DATA_HOP_LATENCY_LEN     4
+#define INT_DATA_BANDWIDTH_LEN       4
+#define INT_DATA_N_PACKETS_LEN       8
+#define INT_DATA_N_BYTES_LEN         8
+#define INT_DATA_QUEUE_LEN           4
+#define INT_DATA_FWD_ACTS            2
+
+#define INT_TYPE_VAL             0x0908
 
 /* host-byte order <-> network-byte order. */
 #define htonll(_x)    ((1==htonl(1)) ? (_x) : \
@@ -101,52 +126,119 @@
 #define Min(a, b) ((a) <= (b) ? (a) : (b))
 #define Minus(a, b) abs(a-b)
 
-/* test packet processing performance per second. */
-#define TEST_SECOND_PERFORMANCE
-/* test the INT header. */
-#define TEST_INT_HEADER
-/* test packet write cost. */
-#define FILTER_PKTS
+/* Unsigned.  */
+# define UINT8_C(c)	c
+# define UINT16_C(c)	c
+# define UINT32_C(c)	c ## U
+# if __WORDSIZE == 64
+#  define UINT64_C(c)	c ## UL
+# else
+#  define UINT64_C(c)	c ## ULL
+# endif
 
-/* define 1s in ms. */
-#define ONE_SECOND_IN_MS 1000000.0
-/* define 50ms. */
-#define FIFTY_MS         50000.0
+/* check INT type (0x0908). */
+#define INT_TYPE_CHECK
 
-#define ERROR_THRESH 0.01   /*  in percentage */
+/* write data every time interval. */
+#define TIME_INTERVAL_SHOULD_WRITE true
+#define ONE_SECOND_IN_MS           1000000.0   // ms
+#define TIME_WRITE_THRESH          50000.0     // ms
 
-#define PRINT_INT_FIELDS            true
+/* write data every packet interval. */
+#define PKT_INTERVAL_SHOULD_WRITE  true
+#define PKT_WRITE_THRESH           1000       // pkts
+
 #define PRINT_SECOND_PERFORMANCE    true
-#define PRINT_SW_CNT                true
 
-/* map_info + switch_id +in_port + out_port + hop_latency + ingress_time + bandwidth + relative_time + cnt. */
-static char * INT_FMT = "%x\t%u\t%u\t%u\t%u\t%llx\t%f\t%f\t%u\n";
-static char * INT_FIELDS_STR = "map_info\tsw\tin_port\tout_port\tdelay\tin_time\tbandwidth\trelative_time\tcnt%s\n";
-static char * INT_PKT_CNT_STR = "sec\t recv_cnt\t sw0\t sw1\t sw2\t sw3\t sw4\t sw5\t sw6%s\n";
+/* supported mapInfo */
+#define CPU_BASED_MAPINFO           0x02ff
+#define NP_BASED_MAPINFO            0x031f
 
-/* INT Header: Metadata set. */
+/* device number on the link. */
+#define MAX_DEVICE        14
+#define MIN_PKT_LEN       60
+
+/*
+ * packet-level info.
+ * INT Header: Metadata set.
+ * */
 typedef struct {
-    uint8_t map_info;
-//    uint16_t type;
-//    uint8_t len;   /* hops */
+//    uint16_t type;      /* INT type = 0x0908 */
+
+//    uint8_t  hops;
+//    uint16_t map_info;    /* bitmap */
 
     uint32_t switch_id;
-    uint8_t in_port;
-    uint8_t out_port;
-    uint16_t hop_latency;
+    uint16_t in_port;
+    uint16_t out_port;
+    uint32_t hop_latency;
     uint64_t ingress_time;
     float bandwidth;
+    uint64_t n_packets;
+    uint64_t n_bytes;
+    uint32_t quene_len;
+    uint16_t fwd_acts;
 
     uint32_t hash;           /* indicate whether to store into files. */
-} item_t;
+} int_item_t;
 
+/*
+ * flow-level info.
+ * */
+typedef struct {
+    uint32_t ufid;                /* unique flow id. <src, dst>. */
+    uint32_t links[MAX_DEVICE];   /* the flow's path. */
 
-/* used for storing INT metadata. */
-FILE *fp;
+    uint64_t start_time;          /* service start time. minimum ingress_time. */
+    uint64_t end_time;            /* service end time. maximum ingress_time. */
 
-/* used to track on pkt_cnt[] */
-#define MAX_DEVICE 6
-#define MIN_PKT_LEN       60
+    uint8_t  hops;
+    uint16_t map_info;    /* bitmap */
+
+    int_item_t his_pkt_info[MAX_DEVICE];      /* historical packet-level info. */
+    int_item_t cur_pkt_info[MAX_DEVICE];      /* current packet-level info. */
+
+    uint32_t jitter_delay[MAX_DEVICE];        /* jitter = cur.latency - his.latency. */
+    uint32_t max_delay[MAX_DEVICE];           /* max_delay = max(his.latency). */
+
+//    uint16_t drop_reason[MAX_DEVICE];         /* 0: no drop
+//                                               * 1: TODO: Deep Learning or other methods judge the drop reason
+//                                               */
+
+} flow_info_t;
+
+/*
+ * ufid = <src, dst>
+ * */
+static inline uint32_t get_ufid(uint8_t *pkt_header) {
+    uint32_t src_ip, dst_ip;
+    uint32_t ufid = 0;
+
+    memcpy(&src_ip, pkt_header + IPV4_SRC_BASE, IPV4_SRC_LEN);
+    memcpy(&dst_ip, pkt_header + IPV4_DST_BASE, IPV4_DST_LEN);
+
+    ufid = src_ip ^ (dst_ip >> 8);
+    ufid = (ufid/10%10) * 10 + ufid % 10;       // range = [0, 100]
+
+    return ufid;
+}
+
+static inline uint64_t get_flow_start_time(uint64_t a, uint64_t b) {
+    if (a == 0) {
+        a = 0xffffffffffffffff;
+    }
+
+    if (b == 0) {
+        b = 0xffffffffffffffff;
+    }
+
+    return Min(a, b);
+}
+
+static inline uint64_t get_flow_end_time(uint64_t a, uint64_t b) {
+
+    return Max(a, b);
+}
 
 static void print_pkt(uint32_t pkt_len, uint8_t *pkt){
     uint32_t i = 0;
@@ -169,30 +261,25 @@ static inline unsigned long long rp_get_us(void) {
     return (unsigned long long) (tv.tv_sec * 1000000L + tv.tv_usec);
 }
 
-/* used as 'hash' condition for statistics. 'switch_id' or 'ttl' as index. */
-uint32_t his_hash[MAX_DEVICE+1] = {0}, hash[MAX_DEVICE+1] = {1, 1, 1, 1, 1, 1};
+static inline unsigned long long rp_get_ns(void) {
+    struct timespec cur;
+    clock_gettime(CLOCK_MONOTONIC, &cur);
+    return (unsigned long long) (cur.tv_sec * 1e9L + cur.tv_nsec);
+}
 
-/* used as 'time_flag' condition for statistics. 'switch_id' or 'ttl' as index. */
-uint16_t last_hop_latency[MAX_DEVICE+1] = {1, 1, 1, 1, 1, 1}, time_flag[MAX_DEVICE+1] = {0};
-
-/* used as 'cnt_threshold' condition for statistics. 'switch_id' or 'ttl' as index. */
-uint32_t pkt_cnt[MAX_DEVICE+1] = {0};   // sw_id is [1, 2, 3, 4, 5, 6], pkt_cnt[0] used for all. reset when write the record.
-uint32_t sw_cnt[MAX_DEVICE+1] = {0};    // count for sw in second, reset per second
 
 /* used for performance test per second. */
-uint32_t recv_cnt = 0, sec_cnt = 0, write_cnt = 0;
-double start_time[MAX_DEVICE+1] = {0}, end_time[MAX_DEVICE+1] = {0};
-double start_time1 = 0, end_time1 = 0;
+uint32_t port_recv_int_cnt = 0, sec_cnt = 0, write_cnt = 0;
+double start_time = 0, end_time = 0;
 
 /* used for relative timestamp. */
-double relative_time[MAX_DEVICE+1] = {0}, delta_time = 0;        // write a record with a relative timestamp
-double relative_start_time = 0;      // when first pkt comes in, timer runs
+double relative_time = 0, delta_time = 0;        // write a record with a relative timestamp
+double relative_start_time = 0;                  // when first pkt comes in, timer runs
 bool first_pkt_in = true;                        // when first pkt comes in, turn 'false'
 
 /* used for INT item. */
-#define ITEM_SIZE 2048
-item_t int_data[ITEM_SIZE] = {0};
-float last_bd[MAX_DEVICE+1] = {0};      // the last one bandwidth, last_bd[sw_id]
+#define MAX_FLOWS 100
+flow_info_t flow_info[MAX_FLOWS] = {0};
 
 static volatile bool force_quit;
 
@@ -326,7 +413,7 @@ dp_packet_data(const struct rte_mbuf *m)
            ? (uint8_t *) m->buf_addr + m->data_off : NULL;
 }
 
-static uint8_t get_set_bits_of_byte(uint8_t byte){
+static inline uint8_t get_set_bits_of_bytes(uint16_t byte){
     uint8_t count = 0;
     while (byte) {
         count += byte & 1;
@@ -336,14 +423,12 @@ static uint8_t get_set_bits_of_byte(uint8_t byte){
 }
 
 
-static uint32_t simple_linear_hash(item_t *item) {
+static uint32_t simple_linear_hash(int_item_t *item) {
     /* hop_latency and ingress_time are volatile, do not hash them. */
     static int prime = 31;
     uint32_t hash = item->switch_id * prime + prime;
     hash += item->in_port * prime;
     hash += item->out_port * prime;
-//    hash += ((uint32_t ) item->bandwidth) * prime;
-//    hash += item->map_info * prime;
 
     item->hash = hash;
 
@@ -353,278 +438,264 @@ static uint32_t simple_linear_hash(item_t *item) {
 static void signal_handler(int signum);
 
 int i;
+uint32_t ufid;
 
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
     uint32_t pkt_len = m->pkt_len;      // packet len
 
+    /* Packet length check. */
     if (pkt_len < MIN_PKT_LEN) {
         return;
     }
 
+    ufid = get_ufid(pkt);
+
     /* used to indicate where to start to parse. */
     uint8_t pos = INT_HEADER_BASE;
 
-    /*===================== REJECT STAGE =======================*/
-#ifdef TEST_INT_HEADER
+    /*
+     * ===================== REJECT STAGE =======================
+     * */
+    /* INT type check. */
+#ifdef INT_TYPE_CHECK
     uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
     uint8_t ttl = pkt[pos++];
-//    printf("type:%d, ttl:%d", type, ttl);
-    if (type != 0x0908 || ttl == 0x00) {
+
+    if (type != INT_TYPE_VAL || ttl == 0x00) {
         return;
     }
 #endif
+
+    /* MapInfo check. */
+    uint16_t map_info = (pkt[pos++] << 8) + pkt[pos++];
+    if (get_set_bits_of_bytes(map_info) == 0) {
+        return;
+    }
+
+    flow_info[ufid].ufid = ufid;
+    flow_info[ufid].hops = ttl;
+    flow_info[ufid].map_info = map_info;
 
     /* first_int_pkt_in, init the 'relative_start_time' */
     if (first_pkt_in) {
         relative_start_time = rp_get_us();
+        start_time = relative_start_time;
 
-        for (i=0; i < (MAX_DEVICE+1); i++) {
-            start_time[i] = relative_start_time;
-        }
         first_pkt_in = false;
-#ifndef PRINT_INT_FIELDS
-        printf(INT_FIELDS_STR, "@ok");
-#endif
-#ifdef PRINT_SW_CNT
-        printf(INT_PKT_CNT_STR, "@ok");
-#endif
     }
 
-    /* if map_info doesn't contaion INT data. */
-    uint8_t map_info = pkt[pos++];
-    if (get_set_bits_of_byte(map_info) == 0) {
-        return;
+    /* port processing packet rate in 1s, clear after per sec. */
+    port_recv_int_cnt++;
+
+    bool time_interval_should_write = false;
+#ifdef TIME_INTERVAL_SHOULD_WRITE
+    end_time = rp_get_us();
+    relative_time = (end_time - relative_start_time) / ONE_SECOND_IN_MS;
+    delta_time = end_time - start_time;
+
+    if (delta_time >= TIME_WRITE_THRESH) {
+        time_interval_should_write = true;
+        start_time = end_time;
     }
+#endif
 
-    recv_cnt++;                // used for how many packet processed in 1s, clear after per sec.
-    int int_idx = recv_cnt % ITEM_SIZE;   //  current index
-    int_data[int_idx].map_info = map_info;
+    bool pkt_interval_should_write = false;
+#ifdef PKT_INTERVAL_SHOULD_WRITE
+    if (port_recv_int_cnt % PKT_WRITE_THRESH == 0) {
+        pkt_interval_should_write = true;
+    }
+#endif
 
-    /*===================== PARSE STAGE =======================*/
+    /*
+     * ===================== PARSE STAGE =======================
+     * */
     uint32_t switch_id = 0x00;
-    for (i = 1; i <= ttl; i++) {    // ttl ranges from [1, 6]
+    uint16_t switch_map_info = map_info;
+    for (i = 0; i < ttl; i++) {
         if (map_info & 0x1) {
             switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
-            sw_cnt[switch_id]++;               // clear per second
+            flow_info[ufid].cur_pkt_info[i].switch_id = switch_id;
         }
 
-        pkt_cnt[switch_id]++;              // clear if printf
+        flow_info[ufid].links[i] = switch_id;
 
-        /* calculate the relative time. */
-        end_time[switch_id] = rp_get_us();
-        relative_time[switch_id] = (end_time[switch_id] - relative_start_time) / ONE_SECOND_IN_MS;  // second
-        delta_time = end_time[switch_id] - start_time[switch_id];
+        /* distinguish switch. */
+        if (0xff000000 & switch_id == 0x00) {   // device: ovs-pof
+            switch_map_info = map_info & CPU_BASED_MAPINFO;
 
-        bool should_write = false;
-        if (delta_time > FIFTY_MS) { // 50ms, th2
-            should_write = true;
-            start_time[switch_id] = end_time[switch_id];
+            if (switch_map_info & (UINT16_C(1) << 1)) {
+                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].in_port = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 2)) {
+                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].out_port = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 3)) {
+                memcpy(&(flow_info[ufid].cur_pkt_info[i].ingress_time), &pkt[pos], INT_DATA_INGRESS_TIME_LEN);
+                flow_info[ufid].cur_pkt_info[i].ingress_time = ntohll(flow_info[ufid].cur_pkt_info[i].ingress_time);
+                pos += INT_DATA_INGRESS_TIME_LEN;
+            } else {
+                flow_info[ufid].cur_pkt_info[i].ingress_time = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 4)) {
+                flow_info[ufid].cur_pkt_info[i].hop_latency = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                            + (pkt[pos++] << 8) + pkt[pos++];
+                /* max_delay and jitter delay. */
+                flow_info[ufid].max_delay[i] = Max(flow_info[ufid].his_pkt_info[i].hop_latency,
+                                               flow_info[ufid].cur_pkt_info[i].hop_latency);
+                flow_info[ufid].jitter_delay[i] = Minus(flow_info[ufid].his_pkt_info[i].hop_latency,
+                                               flow_info[ufid].cur_pkt_info[i].hop_latency);
+            } else {
+                flow_info[ufid].cur_pkt_info[i].hop_latency = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 5)) {
+                memcpy(&(flow_info[ufid].cur_pkt_info[i].bandwidth), &pkt[pos], INT_DATA_BANDWIDTH_LEN);
+                pos += INT_DATA_BANDWIDTH_LEN;
+            } else {
+                flow_info[ufid].cur_pkt_info[i].bandwidth = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 6)) {
+                memcpy(&(flow_info[ufid].cur_pkt_info[i].n_packets), &pkt[pos], INT_DATA_N_PACKETS_LEN);
+                flow_info[ufid].cur_pkt_info[i].n_packets = ntohll(flow_info[ufid].cur_pkt_info[i].n_packets);
+                pos += INT_DATA_N_PACKETS_LEN;
+            } else {
+                flow_info[ufid].cur_pkt_info[i].n_packets = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 7)) {
+                memcpy(&(flow_info[ufid].cur_pkt_info[i].n_bytes), &pkt[pos], INT_DATA_N_BYTES_LEN);
+                flow_info[ufid].cur_pkt_info[i].n_bytes = ntohll(flow_info[ufid].cur_pkt_info[i].n_bytes);
+                pos += INT_DATA_N_BYTES_LEN;
+            } else {
+                flow_info[ufid].cur_pkt_info[i].n_bytes = 0;
+            }
+
+            /*
+            if (switch_map_info & (UINT16_C(1)  << 8)) { //quene_len
+                // not supported
+            }
+            */
+            flow_info[ufid].cur_pkt_info[i].quene_len = 0;
+
+            if (switch_map_info & (UINT16_C(1)  << 9)) {
+                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].fwd_acts = 0;
+            }
+
+        } else {   // device: tofino
+
+            switch_map_info = map_info & NP_BASED_MAPINFO;
+
+            if (switch_map_info & (UINT16_C(1) << 1)) {
+                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].in_port = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 2)) {
+                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].out_port = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 3)) {
+                memcpy(&(flow_info[ufid].cur_pkt_info[i].ingress_time), &pkt[pos], INT_DATA_INGRESS_TIME_LEN);
+                flow_info[ufid].cur_pkt_info[i].ingress_time = ntohll(flow_info[ufid].cur_pkt_info[i].ingress_time);
+                pos += INT_DATA_INGRESS_TIME_LEN;
+            } else {
+                flow_info[ufid].cur_pkt_info[i].ingress_time = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 4)) {
+                flow_info[ufid].cur_pkt_info[i].hop_latency = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                              + (pkt[pos++] << 8) + pkt[pos++];
+                /* max_delay and jitter delay. */
+                flow_info[ufid].max_delay[i] = Max(flow_info[ufid].his_pkt_info[i].hop_latency,
+                                                   flow_info[ufid].cur_pkt_info[i].hop_latency);
+                flow_info[ufid].jitter_delay[i] = Minus(flow_info[ufid].his_pkt_info[i].hop_latency,
+                                                   flow_info[ufid].cur_pkt_info[i].hop_latency);
+            } else {
+                flow_info[ufid].cur_pkt_info[i].hop_latency = 0;
+            }
+
+            /*
+            if (switch_map_info & (0x1 << 5)) {   // bandwidth
+                // not supported
+            }
+
+            if (switch_map_info & (0x1 << 6)) {   // n_packets
+                // not supported
+            }
+
+            if (switch_map_info & (0x1 << 7)) {   // n_bytes
+                // not supported
+            }
+            */
+            flow_info[ufid].cur_pkt_info[i].bandwidth = 0;
+            flow_info[ufid].cur_pkt_info[i].n_packets = 0;
+            flow_info[ufid].cur_pkt_info[i].n_bytes = 0;
+
+            if (switch_map_info & (UINT16_C(1)  << 8)) {
+                flow_info[ufid].cur_pkt_info[i].quene_len = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                              + (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].quene_len = 0;
+            }
+
+            if (switch_map_info & (UINT16_C(1)  << 9)) {
+                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 8) + pkt[pos++];
+            } else {
+                flow_info[ufid].cur_pkt_info[i].fwd_acts = 0;
+            }
         }
+    }
 
-        if (map_info & (0x1 << 1)) {
-            int_data[int_idx].in_port = pkt[pos++];
-        }
+    flow_info[ufid].links[i] = '\0';
+    flow_info[ufid].start_time = get_flow_start_time(flow_info[ufid].his_pkt_info[0].ingress_time,
+            flow_info[ufid].cur_pkt_info[0].ingress_time);  // hop 0 of the link
+    flow_info[ufid].end_time = get_flow_end_time(flow_info[ufid].his_pkt_info[ttl-1].ingress_time,
+            flow_info[ufid].cur_pkt_info[ttl-1].ingress_time);  // hop ttl of the link
 
-        if (map_info & (0x1 << 2)) {
-            int_data[int_idx].out_port = pkt[pos++];
-        }
-
-        if (map_info & (0x1 << 3)) {
-            memcpy(&(int_data[int_idx].ingress_time), &pkt[pos], 8);
-            int_data[int_idx].ingress_time = ntohll(int_data[int_idx].ingress_time);
-            pos += 8;
-        }
-
-        if (map_info & (0x1 << 4)) {
-            int_data[int_idx].hop_latency = (pkt[pos++] << 8) + pkt[pos++];
-        }
-
-        if (map_info & (0x1 << 5)) {
-            memcpy(&(int_data[int_idx].bandwidth), &pkt[pos], 4);
-            pos += 4;
-        }
-
-#ifdef FILTER_PKTS
-        /*===================== FILTER STAGE =======================*/
-        /* we don't process no information updating packets. */
-        float delta_error = Minus(int_data[int_idx].bandwidth, last_bd[switch_id]) / Min(int_data[int_idx].bandwidth, last_bd[switch_id]);
-        last_bd[switch_id] = int_data[int_idx].bandwidth;
-
-        hash[switch_id] = simple_linear_hash(&int_data[int_idx]);
-
-        if ((delta_error > ERROR_THRESH) || (his_hash[switch_id] != hash[switch_id])
-            || should_write) {
-            start_time[switch_id] = end_time[switch_id];
-        } else {
-            continue;
-        }
-#endif
-
-        /* we also store cnt to show how many pkts we last stored as one record. */
-#ifndef PRINT_INT_FIELDS
-        printf(INT_FMT, int_data[int_idx].map_info, switch_id, int_data[int_idx].in_port,
-                int_data[int_idx].out_port, int_data[int_idx].hop_latency, int_data[int_idx].ingress_time,
-                int_data[int_idx].bandwidth, relative_time, pkt_cnt[switch_id]);
-#endif
-        his_hash[switch_id] = hash[switch_id];
-        pkt_cnt[switch_id] = 0;
+    /* output result about flow_info. <cur, his> */
+    if (time_interval_should_write || pkt_interval_should_write) {
+        // TODO: how to output
+        // his_pkt_info
+        // cur_pkt_info
         write_cnt++;
     }
 
+    memcpy(flow_info[ufid].his_pkt_info, flow_info[ufid].cur_pkt_info, sizeof(flow_info[ufid].cur_pkt_info));
+
     /* output how many packets we can parse in a second. */
-#ifdef TEST_SECOND_PERFORMANCE
-    if (recv_cnt == 1) {
-        start_time1 = rp_get_us();
+    if ((end_time - relative_start_time) >= (ONE_SECOND_IN_MS * (sec_cnt+1))) {
         sec_cnt++;
-    }
 
-    end_time1 = rp_get_us();
-
-    if (end_time1 - start_time1 >= ONE_SECOND_IN_MS) {
-
-#ifndef PRINT_SECOND_PERFORMANCE
+#ifdef PRINT_SECOND_PERFORMANCE
         /* second + recv_pkt/s + write/s */
-        printf("%ds\t %d\t %d\n", sec_cnt, recv_cnt, write_cnt);
-#endif
-
-#ifdef PRINT_SW_CNT
-        printf("%ds\t %d\t %d\t %d\t %d\t %d\t %d\t %d\t %d\n", sec_cnt, recv_cnt, sw_cnt[0], sw_cnt[1], sw_cnt[2],
-                sw_cnt[3], sw_cnt[4], sw_cnt[5], sw_cnt[6]);
+        printf("%ds\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
 #endif
 
         fflush(stdout);
-        recv_cnt = 0;
         write_cnt = 0;
-        memset(sw_cnt, 0x00, sizeof(sw_cnt));
-        start_time1 = end_time1;
+        port_recv_int_cnt = 0;
     }
 
     /* auto stop test. 'time_interval'=0 to disable to run. */
     if (!timer_interval || (sec_cnt > timer_interval)) {  // 15s in default, -R [interval] to adjust
         signal_handler(SIGINT);
     }
-#endif
 }
-
-uint16_t pkt_cnt_v2 = 0;
-static void process_int_pkt_v2(struct rte_mbuf *m, unsigned portid) {
-
-    uint8_t *pkt = dp_packet_data(m);   // packet header
-    uint32_t pkt_len = m->pkt_len;      // packet len
-
-    if (pkt_len < MIN_PKT_LEN) {
-        return;
-    }
-
-    /* INT data. */
-    uint32_t switch_id = 0x00;
-    uint8_t in_port = 0x00;
-    uint8_t out_port = 0x00;
-    uint16_t hop_latency = 0x00;
-    uint64_t ingress_time = 0x00;
-    float bandwidth = 0x00;
-
-    uint8_t default_value = 0x00;
-
-    /*===================== REJECT STAGE =======================*/
-    /* only process INT packets with TTL > 0. */
-    uint8_t pos = INT_HEADER_BASE;
-
-#ifndef TEST
-    uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
-    uint8_t ttl = pkt[pos++];
-    if (type != 0x0908 || ttl == 0x00) {
-        return;
-    }
-#endif
-
-    /*printf("process pkts: %d", pkt_cnt);*/
-
-    /* if map_info doesn't contaion INT data. */
-    uint8_t map_info = pkt[pos++];
-    if (get_set_bits_of_byte(map_info) == 0) {
-        return;
-    }
-
-    /*===================== PARSE STAGE =======================*/
-    pkt_cnt_v2++;
-    recv_cnt++;
-
-    if (map_info & 0x1) {
-        switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
-    }
-
-    if (map_info & (0x1 << 1)) {
-        in_port = pkt[pos++];
-    }
-
-    if (map_info & (0x1 << 2)) {
-        out_port = pkt[pos++];
-    }
-
-    if (map_info & (0x1 << 3)) {
-        /*ingress_time = (pkt[pos++] << 56) + (pkt[pos++] << 48) + (pkt[pos++] << 40) + (pkt[pos++] << 32) +
-                   (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];*/
-        memcpy(&ingress_time, &pkt[pos],
-        sizeof(ingress_time));
-        ingress_time = ntohll(ingress_time);
-        pos += 8;
-    }
-
-    if (map_info & (0x1 << 4)) {
-        hop_latency = (pkt[pos++] << 8) + pkt[pos++];
-    }
-
-    if (map_info & (0x1 << 5)) {
-        memcpy(&bandwidth, &pkt[pos],
-        sizeof(bandwidth));
-        pos += 4;
-    }
-
-/*===================== STORE STAGE =======================*/
-item_t item = {
-        .switch_id = (switch_id != 0x00 ? switch_id : default_value),
-        .in_port = (in_port != 0x00 ? in_port : default_value),
-        .out_port = (out_port != 0x00 ? out_port : default_value),
-        .hop_latency = (hop_latency != 0x00 ? hop_latency : default_value),
-        .ingress_time = (ingress_time != 0x00 ? ingress_time : default_value),
-        .bandwidth = (bandwidth != 0x00 ? bandwidth : default_value),
-        .map_info = map_info,
-};
-
-#ifdef TEST_SECOND_PERFORMANCE
-    if (recv_cnt == 1) {
-        start_time1 = rp_get_us();
-        sec_cnt++;
-    }
-
-    end_time1 = rp_get_us();
-
-    if (end_time1 - start_time1 >= 1000000) {
-        printf("%d s processed %d packets/s\n", sec_cnt, recv_cnt);
-        fflush(stdout);
-        recv_cnt = 0;
-        start_time1= end_time1;
-    }
-#endif
-
-/*===================== FILTER STAGE =======================*/
-/* we don't process no information updating packets. */
-    if ((his_hash[0] != simple_linear_hash(&item)) || (pkt_cnt_v2 > STORE_CNT_THRESHOLD)) {
-
-    } else {
-        return;
-    }
-
-    printf(INT_FMT, item.map_info, item.switch_id, item.in_port, item.out_port,
-         item.hop_latency, item.ingress_time, item.bandwidth, 0, pkt_cnt_v2);
-
-    his_hash[0] = item.hash;
-    pkt_cnt_v2 = 0;
-}
-
 
 static void
 l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
@@ -750,9 +821,10 @@ l2fwd_main_loop(void)
 #ifdef L2_FWD
 				l2fwd_simple_forward(m, portid);
 #endif
-				process_int_pkt(m, portid);         // TNSM response
-//                process_int_pkt_v2(m, portid);      // first submission
-                rte_pktmbuf_free(m);   /* free the mbuf. */
+				process_int_pkt(m, portid);
+
+                /* free the mbuf. */
+                rte_pktmbuf_free(m);
 			}
 		}
 	}
@@ -1006,10 +1078,6 @@ main(int argc, char **argv)
 	unsigned lcore_id, rx_lcore_id;
 	unsigned nb_ports_in_mask = 0;
 
-//	fp = fopen("./int-collector.txt", "rw+");
-//	fprintf(fp, INT_STR);
-//	fflush(fp);
-
 	/* init EAL */
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
@@ -1020,9 +1088,6 @@ main(int argc, char **argv)
 	force_quit = false;
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
-
-//	fflush(fp);
-//	fclose(fp);
 
 	/* parse application arguments (after the EAL ones) */
 	ret = l2fwd_parse_args(argc, argv);
