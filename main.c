@@ -88,7 +88,7 @@
 #define IPV4_HEADER_LEN             20
 #define IPV4_SRC_BASE               26
 #define IPV4_SRC_LEN                 4
-#define IPV4_DST_BASE               26
+#define IPV4_DST_BASE               30
 #define IPV4_DST_LEN                 4
 #define IPV4_IP_LEN                  8    // <src, dst>
 
@@ -104,15 +104,15 @@
 
 /* tsf: INT data len. */
 #define INT_DATA_DPID_LEN            4
-#define INT_DATA_IN_PORT_LEN         2
-#define INT_DATA_OUT_PORT_LEN        2
+#define INT_DATA_IN_PORT_LEN         4
+#define INT_DATA_OUT_PORT_LEN        4
 #define INT_DATA_INGRESS_TIME_LEN    8
 #define INT_DATA_HOP_LATENCY_LEN     4
 #define INT_DATA_BANDWIDTH_LEN       4
 #define INT_DATA_N_PACKETS_LEN       8
 #define INT_DATA_N_BYTES_LEN         8
 #define INT_DATA_QUEUE_LEN           4
-#define INT_DATA_FWD_ACTS            2
+#define INT_DATA_FWD_ACTS            4
 
 #define INT_TYPE_VAL             0x0908
 
@@ -169,15 +169,15 @@ typedef struct {
 //    uint16_t map_info;    /* bitmap */
 
     uint32_t switch_id;
-    uint16_t in_port;
-    uint16_t out_port;
+    uint32_t in_port;
+    uint32_t out_port;
     uint32_t hop_latency;
     uint64_t ingress_time;
     float bandwidth;
     uint64_t n_packets;
     uint64_t n_bytes;
     uint32_t quene_len;
-    uint16_t fwd_acts;
+    uint32_t fwd_acts;
 
     uint32_t hash;           /* indicate whether to store into files. */
 } int_item_t;
@@ -192,7 +192,8 @@ typedef struct {
     uint64_t start_time;          /* service start time. minimum ingress_time. */
     uint64_t end_time;            /* service end time. maximum ingress_time. */
 
-    uint8_t  hops;
+    uint8_t  hops;       /* i.e., ttl */
+    uint8_t  pad;
     uint16_t map_info;    /* bitmap */
 
     int_item_t his_pkt_info[MAX_DEVICE];      /* historical packet-level info. */
@@ -201,9 +202,9 @@ typedef struct {
     uint32_t jitter_delay[MAX_DEVICE];        /* jitter = cur.latency - his.latency. */
     uint32_t max_delay[MAX_DEVICE];           /* max_delay = max(his.latency). */
 
-//    uint16_t drop_reason[MAX_DEVICE];         /* 0: no drop
-//                                               * 1: TODO: Deep Learning or other methods judge the drop reason
-//                                               */
+    uint16_t drop_reason[MAX_DEVICE];         /* 0: no drop
+                                               * 1: TODO: Deep Learning or other methods judge the drop reason
+                                               */
 
 } flow_info_t;
 
@@ -349,7 +350,7 @@ struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 static uint64_t timer_period = 10; /* default period is 10 seconds */
 
 /* Running x second, then automatically quit. used in process_int_pkt() */
-static uint32_t timer_interval = 15;   /* default period is 15 seconds */
+static uint32_t timer_interval = 0;   /* default processing time. 0 means always running. */
 
 /* Print out statistics on packets dropped */
 static void
@@ -517,6 +518,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         if (map_info & 0x1) {
             switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
             flow_info[ufid].cur_pkt_info[i].switch_id = switch_id;
+        } else {
+            flow_info[ufid].cur_pkt_info[i].switch_id = 0;
         }
 
         flow_info[ufid].links[i] = switch_id;
@@ -526,13 +529,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             switch_map_info = map_info & CPU_BASED_MAPINFO;
 
             if (switch_map_info & (UINT16_C(1) << 1)) {
-                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 8) + pkt[pos++];
+                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                            + (pkt[pos++] << 8) + pkt[pos++];
             } else {
                 flow_info[ufid].cur_pkt_info[i].in_port = 0;
             }
 
             if (switch_map_info & (UINT16_C(1)  << 2)) {
-                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 8) + pkt[pos++];
+                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                            + (pkt[pos++] << 8) + pkt[pos++];
             } else {
                 flow_info[ufid].cur_pkt_info[i].out_port = 0;
             }
@@ -588,7 +593,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             flow_info[ufid].cur_pkt_info[i].quene_len = 0;
 
             if (switch_map_info & (UINT16_C(1)  << 9)) {
-                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 8) + pkt[pos++];
+                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                         + (pkt[pos++] << 8) + pkt[pos++];
             } else {
                 flow_info[ufid].cur_pkt_info[i].fwd_acts = 0;
             }
@@ -598,13 +604,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             switch_map_info = map_info & NP_BASED_MAPINFO;
 
             if (switch_map_info & (UINT16_C(1) << 1)) {
-                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 8) + pkt[pos++];
+                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                        + (pkt[pos++] << 8) + pkt[pos++];
             } else {
                 flow_info[ufid].cur_pkt_info[i].in_port = 0;
             }
 
             if (switch_map_info & (UINT16_C(1)  << 2)) {
-                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 8) + pkt[pos++];
+                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                         + (pkt[pos++] << 8) + pkt[pos++];
             } else {
                 flow_info[ufid].cur_pkt_info[i].out_port = 0;
             }
@@ -654,7 +662,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             }
 
             if (switch_map_info & (UINT16_C(1)  << 9)) {
-                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 8) + pkt[pos++];
+                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                                                         + (pkt[pos++] << 8) + pkt[pos++];
             } else {
                 flow_info[ufid].cur_pkt_info[i].fwd_acts = 0;
             }
