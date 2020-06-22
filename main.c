@@ -460,7 +460,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     flow_info_t flow_info = {0};
 
     uint32_t ufid = get_ufid(pkt);
-    printf("ufid: 0x%04x\n", ufid);
+    /*printf("ufid: 0x%04x\n", ufid);*/
 
     /* used to indicate where to start to parse. */
     uint8_t pos = INT_HEADER_BASE;
@@ -473,7 +473,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
     uint8_t ttl = pkt[pos++];
 
-    printf("type: 0x%04x, ttl: %x\n", type, ttl);
+    /*printf("type: 0x%04x, ttl: %x\n", type, ttl);*/
 
     if (type != INT_TYPE_VAL || ttl == 0x00) {
         return;
@@ -482,7 +482,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
     /* MapInfo check. */
     uint16_t map_info = (pkt[pos++] << 8) + pkt[pos++];
-    printf("mapInfo: 0x%04x, bitmaps: %d\n", map_info, get_set_bits_of_bytes(map_info));
+    /*printf("mapInfo: 0x%04x, bitmaps: %d\n", map_info, get_set_bits_of_bytes(map_info));*/
     if (get_set_bits_of_bytes(map_info) == 0) {
         return;
     }
@@ -547,15 +547,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
 
         flow_info.links[i] = switch_id;
-        printf("switch_id: 0x%08x\n", switch_id);
+        /*printf("switch_id: 0x%08x\n", switch_id);*/
 
         /* distinguish switch. */
         if ((0xff000000 & switch_id) == 0x00) {   // device: ovs-pof
             switch_map_info = map_info & CPU_BASED_MAPINFO;
-            printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);
+            /*printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);*/
         } else {
             switch_map_info = map_info & NP_BASED_MAPINFO;
-            printf("tofino-final_mapInfo: 0x%04x\n", switch_map_info);
+            /*printf("tofino-final_mapInfo: 0x%04x\n", switch_map_info);*/
         }
 
         if (switch_map_info & (UINT16_C(1) << 1)) {
@@ -565,7 +565,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             in_port = 0;
         }
         flow_info.cur_pkt_info[i].in_port = in_port;
-        printf("ufid:%x, pkt_i:%d, in_port: 0x%08x\n", ufid, i, in_port);
+        /*printf("ufid:%x, pkt_i:%d, in_port: 0x%08x\n", ufid, i, in_port);*/
 
         if (switch_map_info & (UINT16_C(1)  << 2)) {
             out_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
@@ -574,7 +574,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             out_port = 0;
         }
         flow_info.cur_pkt_info[i].out_port = out_port;
-        printf("ufid:%x, pkt_i:%d, out_port: 0x%08x\n", ufid, i, out_port);
+        /*printf("ufid:%x, pkt_i:%d, out_port: 0x%08x\n", ufid, i, out_port);*/
 
         if (switch_map_info & (UINT16_C(1)  << 3)) {
             memcpy(&ingress_time, &pkt[pos], INT_DATA_INGRESS_TIME_LEN);
@@ -584,7 +584,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             ingress_time = 0;
         }
         flow_info.cur_pkt_info[i].ingress_time = ingress_time;
-        printf("ufid:%x, pkt_i:%d, ingress_time: 0x%016lx\n", ufid, i, ingress_time);
+        /*printf("ufid:%x, pkt_i:%d, ingress_time: 0x%016lx\n", ufid, i, ingress_time);*/
 
         if (switch_map_info & (UINT16_C(1)  << 4)) {
             hop_latency = (pkt[pos++] << 24) + (pkt[pos++] << 16)
@@ -598,7 +598,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 //                                           flow_info.cur_pkt_info[i].hop_latency);
 //        flow_info.jitter_delay[i] = Minus(flow_info.his_pkt_info[i].hop_latency,
 //                                                flow_info.cur_pkt_info[i].hop_latency);
-        printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);
+        /*printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);*/
 
         if (switch_map_info & (UINT16_C(1)  << 5)) {
             memcpy(&bandwidth, &pkt[pos], INT_DATA_BANDWIDTH_LEN);
@@ -607,7 +607,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             bandwidth = 0;
         }
         flow_info.cur_pkt_info[i].bandwidth = bandwidth;
-        printf("ufid:%x, pkt_i:%d, bandwidth: %f\n", ufid, i, bandwidth);
+        /*printf("ufid:%x, pkt_i:%d, bandwidth: %f\n", ufid, i, bandwidth);*/
 
         if (switch_map_info & (UINT16_C(1)  << 6)) {
             memcpy(&n_packets, &pkt[pos], INT_DATA_N_PACKETS_LEN);
@@ -617,7 +617,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             n_packets = 0;
         }
         flow_info.cur_pkt_info[i].n_packets = n_packets;
-        printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);
+        /*printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);*/
 
         if (switch_map_info & (UINT16_C(1)  << 7)) {
             memcpy(&n_bytes, &pkt[pos], INT_DATA_N_BYTES_LEN);
@@ -627,7 +627,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             n_bytes = 0;
         }
         flow_info.cur_pkt_info[i].n_bytes = n_bytes;
-        printf("ufid:%x, pkt_i:%d, n_bytes: 0x%016lx\n", ufid, i, n_bytes);
+        /*printf("ufid:%x, pkt_i:%d, n_bytes: 0x%016lx\n", ufid, i, n_bytes);*/
 
 
         if (switch_map_info & (UINT16_C(1)  << 8)) {
@@ -637,7 +637,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             queue_len = 0;
         }
         flow_info.cur_pkt_info[i].queue_len = queue_len;
-        printf("ufid:%x, pkt_i:%d, queue_len: %d\n", ufid, i, queue_len);
+       /*printf("ufid:%x, pkt_i:%d, queue_len: %d\n", ufid, i, queue_len);*/
 
         if (switch_map_info & (UINT16_C(1)  << 9)) {
             fwd_acts = (pkt[pos++] << 24) + (pkt[pos++] << 16)
@@ -646,11 +646,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             fwd_acts = 0;
         }
         flow_info.cur_pkt_info[i].fwd_acts = fwd_acts;
-        printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);
+        /*printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);*/
     }
 
-    flow_info.links[i++] = 2;
-    flow_info.links[i++] = 5;
     flow_info.links[i] = '\0';
 //    flow_info.start_time = get_flow_start_time(flow_info.his_pkt_info[0].ingress_time,
 //            flow_info.cur_pkt_info[0].ingress_time);  // hop 0 of the link
@@ -661,11 +659,12 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
 
-        ttl = 2;
-        /* print node's INT info */
+        unsigned long long print_timestamp = rp_get_us();
+        /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
-            printf("%d\t %d\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
-                   NODE_INT_INFO, ufid, flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
+            printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
+                   NODE_INT_INFO, ufid, print_timestamp,
+                   flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
                    flow_info.cur_pkt_info[i].out_port, flow_info.cur_pkt_info[i].ingress_time,
                    flow_info.cur_pkt_info[i].hop_latency, flow_info.cur_pkt_info[i].bandwidth,
                    flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
@@ -673,8 +672,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         }
 
         /* print link path */
-        printf("%d\t %d\t ", LINK_PATH, ufid);
-        ttl = 6;
+        printf("%d\t %d\t %llu\t ", LINK_PATH, ufid, print_timestamp);
         for (i = 0; i < ttl; i++) {
             if (flow_info.links[i] == '\0') {
                 break;
