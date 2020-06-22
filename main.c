@@ -176,7 +176,7 @@ typedef struct {
     float bandwidth;
     uint64_t n_packets;
     uint64_t n_bytes;
-    uint32_t quene_len;
+    uint32_t queue_len;
     uint32_t fwd_acts;
 
     uint32_t hash;           /* indicate whether to store into files. */
@@ -189,22 +189,23 @@ typedef struct {
     uint32_t ufid;                /* unique flow id. <src, dst>. */
     uint32_t links[MAX_DEVICE];   /* the flow's path. */
 
-    uint64_t start_time;          /* service start time. minimum ingress_time. */
-    uint64_t end_time;            /* service end time. maximum ingress_time. */
-
     uint8_t  hops;       /* i.e., ttl */
     uint8_t  pad;
     uint16_t map_info;    /* bitmap */
 
-    int_item_t his_pkt_info[MAX_DEVICE];      /* historical packet-level info. */
+    /* below element should be completed by DB */
+//    uint64_t start_time;          /* service start time. minimum ingress_time. */
+//    uint64_t end_time;            /* service end time. maximum ingress_time. */
+
+//    int_item_t his_pkt_info[MAX_DEVICE];      /* historical packet-level info. */
     int_item_t cur_pkt_info[MAX_DEVICE];      /* current packet-level info. */
-
-    uint32_t jitter_delay[MAX_DEVICE];        /* jitter = cur.latency - his.latency. */
-    uint32_t max_delay[MAX_DEVICE];           /* max_delay = max(his.latency). */
-
-    uint16_t drop_reason[MAX_DEVICE];         /* 0: no drop
-                                               * 1: TODO: Deep Learning or other methods judge the drop reason
-                                               */
+//
+//    uint32_t jitter_delay[MAX_DEVICE];        /* jitter = cur.latency - his.latency. */
+//    uint32_t max_delay[MAX_DEVICE];           /* max_delay = max(his.latency). */
+//
+//    uint16_t drop_reason[MAX_DEVICE];         /* 0: no drop
+//                                               * 1: TODO: Deep Learning or other methods judge the drop reason
+//                                               */
 
 } flow_info_t;
 
@@ -280,7 +281,7 @@ bool first_pkt_in = true;                        // when first pkt comes in, tur
 
 /* used for INT item. */
 #define MAX_FLOWS 100
-flow_info_t flow_info[MAX_FLOWS] = {0};
+flow_info_t flow_infos[MAX_FLOWS] = {0};
 
 static volatile bool force_quit;
 
@@ -440,6 +441,12 @@ static void signal_handler(int signum);
 
 int i;
 
+/* indicate DB to recognize data type */
+enum DATA_OUTPUT_TYPE {
+    NODE_INT_INFO = 1,
+    LINK_PATH = 2
+} data_output_type;
+
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
@@ -450,9 +457,10 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         return;
     }
 
+    flow_info_t flow_info = {0};
+
     uint32_t ufid = get_ufid(pkt);
     printf("ufid: 0x%04x\n", ufid);
-    ufid = 1;
 
     /* used to indicate where to start to parse. */
     uint8_t pos = INT_HEADER_BASE;
@@ -479,9 +487,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         return;
     }
 
-    flow_info[ufid].ufid = ufid;
-    flow_info[ufid].hops = ttl;
-    flow_info[ufid].map_info = map_info;
+    flow_info.ufid = ufid;
+    flow_info.hops = ttl;
+    flow_info.map_info = map_info;
 
     /* first_int_pkt_in, init the 'relative_start_time' */
     if (first_pkt_in) {
@@ -535,10 +543,10 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             switch_id = 0;  // unlikely
         }
-        flow_info[ufid].cur_pkt_info[i].switch_id = switch_id;
+        flow_info.cur_pkt_info[i].switch_id = switch_id;
 
 
-        flow_info[ufid].links[i] = switch_id;
+        flow_info.links[i] = switch_id;
         printf("switch_id: 0x%08x\n", switch_id);
 
         /* distinguish switch. */
@@ -556,7 +564,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             in_port = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].in_port = in_port;
+        flow_info.cur_pkt_info[i].in_port = in_port;
         printf("ufid:%x, pkt_i:%d, in_port: 0x%08x\n", ufid, i, in_port);
 
         if (switch_map_info & (UINT16_C(1)  << 2)) {
@@ -565,7 +573,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             out_port = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].out_port = out_port;
+        flow_info.cur_pkt_info[i].out_port = out_port;
         printf("ufid:%x, pkt_i:%d, out_port: 0x%08x\n", ufid, i, out_port);
 
         if (switch_map_info & (UINT16_C(1)  << 3)) {
@@ -575,7 +583,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             ingress_time = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].ingress_time = ingress_time;
+        flow_info.cur_pkt_info[i].ingress_time = ingress_time;
         printf("ufid:%x, pkt_i:%d, ingress_time: 0x%016lx\n", ufid, i, ingress_time);
 
         if (switch_map_info & (UINT16_C(1)  << 4)) {
@@ -584,12 +592,12 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             hop_latency = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].hop_latency = hop_latency;
+        flow_info.cur_pkt_info[i].hop_latency = hop_latency;
         /* max_delay and jitter delay. */
-        flow_info[ufid].max_delay[i] = Max(flow_info[ufid].his_pkt_info[i].hop_latency,
-                                           flow_info[ufid].cur_pkt_info[i].hop_latency);
-        flow_info[ufid].jitter_delay[i] = Minus(flow_info[ufid].his_pkt_info[i].hop_latency,
-                                                flow_info[ufid].cur_pkt_info[i].hop_latency);
+//        flow_info.max_delay[i] = Max(flow_info.his_pkt_info[i].hop_latency,
+//                                           flow_info.cur_pkt_info[i].hop_latency);
+//        flow_info.jitter_delay[i] = Minus(flow_info.his_pkt_info[i].hop_latency,
+//                                                flow_info.cur_pkt_info[i].hop_latency);
         printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);
 
         if (switch_map_info & (UINT16_C(1)  << 5)) {
@@ -598,7 +606,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             bandwidth = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].bandwidth = bandwidth;
+        flow_info.cur_pkt_info[i].bandwidth = bandwidth;
         printf("ufid:%x, pkt_i:%d, bandwidth: %f\n", ufid, i, bandwidth);
 
         if (switch_map_info & (UINT16_C(1)  << 6)) {
@@ -608,7 +616,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             n_packets = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].n_packets = n_packets;
+        flow_info.cur_pkt_info[i].n_packets = n_packets;
         printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);
 
         if (switch_map_info & (UINT16_C(1)  << 7)) {
@@ -618,7 +626,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             n_bytes = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].n_bytes = n_bytes;
+        flow_info.cur_pkt_info[i].n_bytes = n_bytes;
         printf("ufid:%x, pkt_i:%d, n_bytes: 0x%016lx\n", ufid, i, n_bytes);
 
 
@@ -628,7 +636,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             queue_len = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].quene_len = queue_len;
+        flow_info.cur_pkt_info[i].queue_len = queue_len;
         printf("ufid:%x, pkt_i:%d, queue_len: %d\n", ufid, i, queue_len);
 
         if (switch_map_info & (UINT16_C(1)  << 9)) {
@@ -637,28 +645,49 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             fwd_acts = 0;
         }
-        flow_info[ufid].cur_pkt_info[i].fwd_acts = fwd_acts;
+        flow_info.cur_pkt_info[i].fwd_acts = fwd_acts;
         printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);
     }
 
-    flow_info[ufid].links[i] = '\0';
-    flow_info[ufid].start_time = get_flow_start_time(flow_info[ufid].his_pkt_info[0].ingress_time,
-            flow_info[ufid].cur_pkt_info[0].ingress_time);  // hop 0 of the link
-    flow_info[ufid].end_time = get_flow_end_time(flow_info[ufid].his_pkt_info[ttl-1].ingress_time,
-            flow_info[ufid].cur_pkt_info[ttl-1].ingress_time);  // hop ttl of the link
+    flow_info.links[i++] = 2;
+    flow_info.links[i++] = 5;
+    flow_info.links[i] = '\0';
+//    flow_info.start_time = get_flow_start_time(flow_info.his_pkt_info[0].ingress_time,
+//            flow_info.cur_pkt_info[0].ingress_time);  // hop 0 of the link
+//    flow_info.end_time = get_flow_end_time(flow_info.his_pkt_info[ttl-1].ingress_time,
+//            flow_info.cur_pkt_info[ttl-1].ingress_time);  // hop ttl of the link
 
     /* output result about flow_info. <cur, his> */
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
-        // his_pkt_info
-        // cur_pkt_info
-        printf("%d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
-                switch_id, in_port, out_port, ingress_time, hop_latency,
-                bandwidth, n_packets, n_bytes, queue_len, fwd_acts);
+
+        ttl = 2;
+        /* print node's INT info */
+        for (i = 0; i < ttl; i++) {
+            printf("%d\t %d\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
+                   NODE_INT_INFO, ufid, flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
+                   flow_info.cur_pkt_info[i].out_port, flow_info.cur_pkt_info[i].ingress_time,
+                   flow_info.cur_pkt_info[i].hop_latency, flow_info.cur_pkt_info[i].bandwidth,
+                   flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
+                   flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts);
+        }
+
+        /* print link path */
+        printf("%d\t %d\t ", LINK_PATH, ufid);
+        ttl = 6;
+        for (i = 0; i < ttl; i++) {
+            if (flow_info.links[i] == '\0') {
+                break;
+            }
+
+            printf("%d\t ", flow_info.links[i]);
+        }
+        printf("\n");
+
         write_cnt++;
     }
 
-    memcpy(flow_info[ufid].his_pkt_info, flow_info[ufid].cur_pkt_info, sizeof(flow_info[ufid].cur_pkt_info));
+//    memcpy(flow_info.his_pkt_info, flow_info.cur_pkt_info, sizeof(flow_info.cur_pkt_info));
 
     /* output how many packets we can parse in a second. */
     if ((end_time - relative_start_time) >= (ONE_SECOND_IN_MS * (sec_cnt+1))) {
