@@ -439,7 +439,6 @@ static uint32_t simple_linear_hash(int_item_t *item) {
 static void signal_handler(int signum);
 
 int i;
-uint32_t ufid;
 
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
@@ -451,7 +450,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         return;
     }
 
-    ufid = get_ufid(pkt);
+    uint32_t ufid = get_ufid(pkt);
+    printf("ufid: 0x%04x\n", ufid);
+    ufid = 1;
 
     /* used to indicate where to start to parse. */
     uint8_t pos = INT_HEADER_BASE;
@@ -464,6 +465,8 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
     uint8_t ttl = pkt[pos++];
 
+    printf("type: 0x%04x, ttl: %x\n", type, ttl);
+
     if (type != INT_TYPE_VAL || ttl == 0x00) {
         return;
     }
@@ -471,6 +474,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
     /* MapInfo check. */
     uint16_t map_info = (pkt[pos++] << 8) + pkt[pos++];
+    printf("mapInfo: 0x%04x, bitmaps: %d\n", map_info, get_set_bits_of_bytes(map_info));
     if (get_set_bits_of_bytes(map_info) == 0) {
         return;
     }
@@ -512,162 +516,129 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /*
      * ===================== PARSE STAGE =======================
      * */
-    uint32_t switch_id = 0x00;
     uint16_t switch_map_info = map_info;
+    uint32_t switch_id = 0;
+    uint32_t in_port = 0;
+    uint32_t out_port = 0;
+    uint64_t ingress_time = 0;
+    uint32_t hop_latency = 0;
+    float bandwidth = 0;
+    uint64_t n_packets = 0;
+    uint64_t n_bytes = 0;
+    uint32_t queue_len = 0;
+    uint32_t fwd_acts = 0;
+
+
     for (i = 0; i < ttl; i++) {
         if (map_info & 0x1) {
             switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
-            flow_info[ufid].cur_pkt_info[i].switch_id = switch_id;
         } else {
-            flow_info[ufid].cur_pkt_info[i].switch_id = 0;
+            switch_id = 0;  // unlikely
         }
+        flow_info[ufid].cur_pkt_info[i].switch_id = switch_id;
+
 
         flow_info[ufid].links[i] = switch_id;
+        printf("switch_id: 0x%08x\n", switch_id);
 
         /* distinguish switch. */
-        if (0xff000000 & switch_id == 0x00) {   // device: ovs-pof
+        if ((0xff000000 & switch_id) == 0x00) {   // device: ovs-pof
             switch_map_info = map_info & CPU_BASED_MAPINFO;
-
-            if (switch_map_info & (UINT16_C(1) << 1)) {
-                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                            + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].in_port = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 2)) {
-                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                            + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].out_port = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 3)) {
-                memcpy(&(flow_info[ufid].cur_pkt_info[i].ingress_time), &pkt[pos], INT_DATA_INGRESS_TIME_LEN);
-                flow_info[ufid].cur_pkt_info[i].ingress_time = ntohll(flow_info[ufid].cur_pkt_info[i].ingress_time);
-                pos += INT_DATA_INGRESS_TIME_LEN;
-            } else {
-                flow_info[ufid].cur_pkt_info[i].ingress_time = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 4)) {
-                flow_info[ufid].cur_pkt_info[i].hop_latency = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                            + (pkt[pos++] << 8) + pkt[pos++];
-                /* max_delay and jitter delay. */
-                flow_info[ufid].max_delay[i] = Max(flow_info[ufid].his_pkt_info[i].hop_latency,
-                                               flow_info[ufid].cur_pkt_info[i].hop_latency);
-                flow_info[ufid].jitter_delay[i] = Minus(flow_info[ufid].his_pkt_info[i].hop_latency,
-                                               flow_info[ufid].cur_pkt_info[i].hop_latency);
-            } else {
-                flow_info[ufid].cur_pkt_info[i].hop_latency = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 5)) {
-                memcpy(&(flow_info[ufid].cur_pkt_info[i].bandwidth), &pkt[pos], INT_DATA_BANDWIDTH_LEN);
-                pos += INT_DATA_BANDWIDTH_LEN;
-            } else {
-                flow_info[ufid].cur_pkt_info[i].bandwidth = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 6)) {
-                memcpy(&(flow_info[ufid].cur_pkt_info[i].n_packets), &pkt[pos], INT_DATA_N_PACKETS_LEN);
-                flow_info[ufid].cur_pkt_info[i].n_packets = ntohll(flow_info[ufid].cur_pkt_info[i].n_packets);
-                pos += INT_DATA_N_PACKETS_LEN;
-            } else {
-                flow_info[ufid].cur_pkt_info[i].n_packets = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 7)) {
-                memcpy(&(flow_info[ufid].cur_pkt_info[i].n_bytes), &pkt[pos], INT_DATA_N_BYTES_LEN);
-                flow_info[ufid].cur_pkt_info[i].n_bytes = ntohll(flow_info[ufid].cur_pkt_info[i].n_bytes);
-                pos += INT_DATA_N_BYTES_LEN;
-            } else {
-                flow_info[ufid].cur_pkt_info[i].n_bytes = 0;
-            }
-
-            /*
-            if (switch_map_info & (UINT16_C(1)  << 8)) { //quene_len
-                // not supported
-            }
-            */
-            flow_info[ufid].cur_pkt_info[i].quene_len = 0;
-
-            if (switch_map_info & (UINT16_C(1)  << 9)) {
-                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                         + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].fwd_acts = 0;
-            }
-
-        } else {   // device: tofino
-
+            printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);
+        } else {
             switch_map_info = map_info & NP_BASED_MAPINFO;
-
-            if (switch_map_info & (UINT16_C(1) << 1)) {
-                flow_info[ufid].cur_pkt_info[i].in_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                        + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].in_port = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 2)) {
-                flow_info[ufid].cur_pkt_info[i].out_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                         + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].out_port = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 3)) {
-                memcpy(&(flow_info[ufid].cur_pkt_info[i].ingress_time), &pkt[pos], INT_DATA_INGRESS_TIME_LEN);
-                flow_info[ufid].cur_pkt_info[i].ingress_time = ntohll(flow_info[ufid].cur_pkt_info[i].ingress_time);
-                pos += INT_DATA_INGRESS_TIME_LEN;
-            } else {
-                flow_info[ufid].cur_pkt_info[i].ingress_time = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 4)) {
-                flow_info[ufid].cur_pkt_info[i].hop_latency = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                              + (pkt[pos++] << 8) + pkt[pos++];
-                /* max_delay and jitter delay. */
-                flow_info[ufid].max_delay[i] = Max(flow_info[ufid].his_pkt_info[i].hop_latency,
-                                                   flow_info[ufid].cur_pkt_info[i].hop_latency);
-                flow_info[ufid].jitter_delay[i] = Minus(flow_info[ufid].his_pkt_info[i].hop_latency,
-                                                   flow_info[ufid].cur_pkt_info[i].hop_latency);
-            } else {
-                flow_info[ufid].cur_pkt_info[i].hop_latency = 0;
-            }
-
-            /*
-            if (switch_map_info & (0x1 << 5)) {   // bandwidth
-                // not supported
-            }
-
-            if (switch_map_info & (0x1 << 6)) {   // n_packets
-                // not supported
-            }
-
-            if (switch_map_info & (0x1 << 7)) {   // n_bytes
-                // not supported
-            }
-            */
-            flow_info[ufid].cur_pkt_info[i].bandwidth = 0;
-            flow_info[ufid].cur_pkt_info[i].n_packets = 0;
-            flow_info[ufid].cur_pkt_info[i].n_bytes = 0;
-
-            if (switch_map_info & (UINT16_C(1)  << 8)) {
-                flow_info[ufid].cur_pkt_info[i].quene_len = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                              + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].quene_len = 0;
-            }
-
-            if (switch_map_info & (UINT16_C(1)  << 9)) {
-                flow_info[ufid].cur_pkt_info[i].fwd_acts = (pkt[pos++] << 24) + (pkt[pos++] << 16)
-                                                         + (pkt[pos++] << 8) + pkt[pos++];
-            } else {
-                flow_info[ufid].cur_pkt_info[i].fwd_acts = 0;
-            }
+            printf("tofino-final_mapInfo: 0x%04x\n", switch_map_info);
         }
+
+        if (switch_map_info & (UINT16_C(1) << 1)) {
+            in_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                      + (pkt[pos++] << 8) + pkt[pos++];
+        } else {
+            in_port = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].in_port = in_port;
+        printf("ufid:%x, pkt_i:%d, in_port: 0x%08x\n", ufid, i, in_port);
+
+        if (switch_map_info & (UINT16_C(1)  << 2)) {
+            out_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                       + (pkt[pos++] << 8) + pkt[pos++];
+        } else {
+            out_port = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].out_port = out_port;
+        printf("ufid:%x, pkt_i:%d, out_port: 0x%08x\n", ufid, i, out_port);
+
+        if (switch_map_info & (UINT16_C(1)  << 3)) {
+            memcpy(&ingress_time, &pkt[pos], INT_DATA_INGRESS_TIME_LEN);
+            ingress_time = ntohll(ingress_time);
+            pos += INT_DATA_INGRESS_TIME_LEN;
+        } else {
+            ingress_time = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].ingress_time = ingress_time;
+        printf("ufid:%x, pkt_i:%d, ingress_time: 0x%016lx\n", ufid, i, ingress_time);
+
+        if (switch_map_info & (UINT16_C(1)  << 4)) {
+            hop_latency = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                          + (pkt[pos++] << 8) + pkt[pos++];
+        } else {
+            hop_latency = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].hop_latency = hop_latency;
+        /* max_delay and jitter delay. */
+        flow_info[ufid].max_delay[i] = Max(flow_info[ufid].his_pkt_info[i].hop_latency,
+                                           flow_info[ufid].cur_pkt_info[i].hop_latency);
+        flow_info[ufid].jitter_delay[i] = Minus(flow_info[ufid].his_pkt_info[i].hop_latency,
+                                                flow_info[ufid].cur_pkt_info[i].hop_latency);
+        printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);
+
+        if (switch_map_info & (UINT16_C(1)  << 5)) {
+            memcpy(&bandwidth, &pkt[pos], INT_DATA_BANDWIDTH_LEN);
+            pos += INT_DATA_BANDWIDTH_LEN;
+        } else {
+            bandwidth = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].bandwidth = bandwidth;
+        printf("ufid:%x, pkt_i:%d, bandwidth: %f\n", ufid, i, bandwidth);
+
+        if (switch_map_info & (UINT16_C(1)  << 6)) {
+            memcpy(&n_packets, &pkt[pos], INT_DATA_N_PACKETS_LEN);
+            n_packets = ntohll(n_packets);
+            pos += INT_DATA_N_PACKETS_LEN;
+        } else {
+            n_packets = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].n_packets = n_packets;
+        printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);
+
+        if (switch_map_info & (UINT16_C(1)  << 7)) {
+            memcpy(&n_bytes, &pkt[pos], INT_DATA_N_BYTES_LEN);
+            n_bytes = ntohll(n_bytes);
+            pos += INT_DATA_N_BYTES_LEN;
+        } else {
+            n_bytes = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].n_bytes = n_bytes;
+        printf("ufid:%x, pkt_i:%d, n_bytes: 0x%016lx\n", ufid, i, n_bytes);
+
+
+        if (switch_map_info & (UINT16_C(1)  << 8)) {
+            queue_len = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                        + (pkt[pos++] << 8) + pkt[pos++];
+        } else {
+            queue_len = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].quene_len = queue_len;
+        printf("ufid:%x, pkt_i:%d, queue_len: %d\n", ufid, i, queue_len);
+
+        if (switch_map_info & (UINT16_C(1)  << 9)) {
+            fwd_acts = (pkt[pos++] << 24) + (pkt[pos++] << 16)
+                       + (pkt[pos++] << 8) + pkt[pos++];
+        } else {
+            fwd_acts = 0;
+        }
+        flow_info[ufid].cur_pkt_info[i].fwd_acts = fwd_acts;
+        printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);
     }
 
     flow_info[ufid].links[i] = '\0';
@@ -681,6 +652,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         // TODO: how to output
         // his_pkt_info
         // cur_pkt_info
+        printf("%d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
+                switch_id, in_port, out_port, ingress_time, hop_latency,
+                bandwidth, n_packets, n_bytes, queue_len, fwd_acts);
         write_cnt++;
     }
 
@@ -701,7 +675,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     }
 
     /* auto stop test. 'time_interval'=0 to disable to run. */
-    if (!timer_interval || (sec_cnt > timer_interval)) {  // 15s in default, -R [interval] to adjust
+    if (timer_interval && (sec_cnt > timer_interval)) {  // 15s in default, -R [interval] to adjust
         signal_handler(SIGINT);
     }
 }
