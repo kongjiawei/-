@@ -93,7 +93,7 @@
 #define IPV4_IP_LEN                  8    // <src, dst>
 
 #define INT_HEADER_BASE             34
-#define INT_HEADER_LEN               4
+#define INT_HEADER_LEN               5
 #define INT_HEADER_TYPE_OFF         34
 #define INT_HEADER_TYPE_LEN          2
 #define INT_HEADER_TTL_OFF          36
