@@ -662,7 +662,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /* output result about flow_info. <cur, his> */
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
-
+#ifdef PRINT_RESULT
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
@@ -685,6 +685,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             printf("%d\t ", flow_info.links[i]);
         }
         printf("\n");
+#endif
 
         write_cnt++;
     }
