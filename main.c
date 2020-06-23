@@ -124,7 +124,7 @@
 
 #define Max(a, b) ((a) >= (b) ? (a) : (b))
 #define Min(a, b) ((a) <= (b) ? (a) : (b))
-#define Minus(a, b) abs(a-b)
+#define AbsMinus(a, b) abs(a-b)
 
 /* Unsigned.  */
 # define UINT8_C(c)	c
@@ -183,7 +183,7 @@ typedef struct {
 } int_item_t;
 
 /*
- * flow-level info.
+ * flow-level info. for single flow.
  * */
 typedef struct {
     uint32_t ufid;                /* unique flow id. <src, dst>. */
@@ -200,8 +200,8 @@ typedef struct {
 //    int_item_t his_pkt_info[MAX_DEVICE];      /* historical packet-level info. */
     int_item_t cur_pkt_info[MAX_DEVICE];      /* current packet-level info. */
 //
-//    uint32_t jitter_delay[MAX_DEVICE];        /* jitter = cur.latency - his.latency. */
-//    uint32_t max_delay[MAX_DEVICE];           /* max_delay = max(his.latency). */
+    uint32_t jitter_delay[MAX_DEVICE];        /* jitter = cur.latency - his.latency. */
+    uint32_t max_delay[MAX_DEVICE];           /* max_delay = max(his.latency). */
 //
 //    uint16_t drop_reason[MAX_DEVICE];         /* 0: no drop
 //                                               * 1: TODO: Deep Learning or other methods judge the drop reason
@@ -447,6 +447,8 @@ enum DATA_OUTPUT_TYPE {
     LINK_PATH = 2
 } data_output_type;
 
+flow_info_t flow_info = {0};
+
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
@@ -457,7 +459,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         return;
     }
 
-    flow_info_t flow_info = {0};
+//    flow_info_t flow_info = {0};
 
     uint32_t ufid = get_ufid(pkt);
     /*printf("ufid: 0x%04x\n", ufid);*/
@@ -592,13 +594,15 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             hop_latency = 0;
         }
-        flow_info.cur_pkt_info[i].hop_latency = hop_latency;
+
         /* max_delay and jitter delay. */
-//        flow_info.max_delay[i] = Max(flow_info.his_pkt_info[i].hop_latency,
-//                                           flow_info.cur_pkt_info[i].hop_latency);
-//        flow_info.jitter_delay[i] = Minus(flow_info.his_pkt_info[i].hop_latency,
-//                                                flow_info.cur_pkt_info[i].hop_latency);
+        flow_info.max_delay[i] = Max(hop_latency, flow_info.max_delay[i]);
+        uint32_t his_hop_latency = flow_info.cur_pkt_info[i].hop_latency;
+        flow_info.jitter_delay[i] = AbsMinus(hop_latency, his_hop_latency);
+        flow_info.cur_pkt_info[i].hop_latency = hop_latency;
         /*printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);*/
+        /*printf("ufid:%x, pkt_i:%d, latency:%d, jitter: %d, max_delay:%d\n",
+                ufid, i, hop_latency, flow_info.jitter_delay[i], flow_info.max_delay[i]);*/
 
         if (switch_map_info & (UINT16_C(1)  << 5)) {
             memcpy(&bandwidth, &pkt[pos], INT_DATA_BANDWIDTH_LEN);
