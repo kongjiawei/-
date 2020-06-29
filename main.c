@@ -447,6 +447,15 @@ enum DATA_OUTPUT_TYPE {
     LINK_PATH = 2
 } data_output_type;
 
+/* switch type */
+enum SWITCH_TYPE {
+    OVS_POF = 0,
+    TOFINO = 1
+};
+
+/* tofino has 'bos' at bit 32 every 4B. */
+uint32_t bos_bit[2] = {0xffffffff, 0x7fffffff};
+
 flow_info_t flow_info = {0};
 
 /* tsf: parse, filter and collect the INT fields. */
@@ -538,7 +547,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint32_t queue_len = 0;
     uint32_t fwd_acts = 0;
 
-
+    uint32_t switch_type = 0;
     for (i = 0; i < ttl; i++) {
         if (map_info & 0x1) {
             switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
@@ -554,11 +563,14 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         /* distinguish switch. */
         if ((0xff000000 & switch_id) == 0x00) {   // device: ovs-pof
             switch_map_info = map_info & CPU_BASED_MAPINFO;
+            switch_type = OVS_POF;
             /*printf("ovs-final_mapInfo: 0x%04x\n", switch_map_info);*/
         } else {
             switch_map_info = map_info & NP_BASED_MAPINFO;
+            switch_type = TOFINO;
             /*printf("tofino-final_mapInfo: 0x%04x\n", switch_map_info);*/
         }
+        switch_id = switch_id & bos_bit[switch_type];
 
         if (switch_map_info & (UINT16_C(1) << 1)) {
             in_port = (pkt[pos++] << 24) + (pkt[pos++] << 16)
@@ -566,7 +578,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             in_port = 0;
         }
-        flow_info.cur_pkt_info[i].in_port = in_port;
+        flow_info.cur_pkt_info[i].in_port = in_port & bos_bit[switch_type];
         /*printf("ufid:%x, pkt_i:%d, in_port: 0x%08x\n", ufid, i, in_port);*/
 
         if (switch_map_info & (UINT16_C(1)  << 2)) {
@@ -575,7 +587,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             out_port = 0;
         }
-        flow_info.cur_pkt_info[i].out_port = out_port;
+        flow_info.cur_pkt_info[i].out_port = out_port & bos_bit[switch_type];
         /*printf("ufid:%x, pkt_i:%d, out_port: 0x%08x\n", ufid, i, out_port);*/
 
         if (switch_map_info & (UINT16_C(1)  << 3)) {
@@ -599,7 +611,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         flow_info.max_delay[i] = Max(hop_latency, flow_info.max_delay[i]);
         uint32_t his_hop_latency = flow_info.cur_pkt_info[i].hop_latency;
         flow_info.jitter_delay[i] = AbsMinus(hop_latency, his_hop_latency);
-        flow_info.cur_pkt_info[i].hop_latency = hop_latency;
+        flow_info.cur_pkt_info[i].hop_latency = hop_latency & bos_bit[switch_type];
         /*printf("ufid:%x, pkt_i:%d, hop_latency: 0x%08x\n", ufid, i, hop_latency);*/
         /*printf("ufid:%x, pkt_i:%d, latency:%d, jitter: %d, max_delay:%d\n",
                 ufid, i, hop_latency, flow_info.jitter_delay[i], flow_info.max_delay[i]);*/
@@ -640,7 +652,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             queue_len = 0;
         }
-        flow_info.cur_pkt_info[i].queue_len = queue_len;
+        flow_info.cur_pkt_info[i].queue_len = queue_len & bos_bit[switch_type];
        /*printf("ufid:%x, pkt_i:%d, queue_len: %d\n", ufid, i, queue_len);*/
 
         if (switch_map_info & (UINT16_C(1)  << 9)) {
@@ -649,7 +661,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             fwd_acts = 0;
         }
-        flow_info.cur_pkt_info[i].fwd_acts = fwd_acts;
+        flow_info.cur_pkt_info[i].fwd_acts = fwd_acts & bos_bit[switch_type];
         /*printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);*/
     }
 
@@ -662,7 +674,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /* output result about flow_info. <cur, his> */
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
-#ifdef PRINT_RESULT
+#ifndef PRINT_RESULT
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
