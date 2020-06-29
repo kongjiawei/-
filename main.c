@@ -597,6 +597,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             ingress_time = 0;
         }
+        if (switch_type == TOFINO) {
+            ingress_time = ingress_time & bos_bit[TOFINO];
+        }
         flow_info.cur_pkt_info[i].ingress_time = ingress_time;
         /*printf("ufid:%x, pkt_i:%d, ingress_time: 0x%016lx\n", ufid, i, ingress_time);*/
 
@@ -632,6 +635,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         } else {
             n_packets = 0;
         }
+        if (switch_type == TOFINO) {
+            n_packets = 0;    // tofino not supported
+        }
         flow_info.cur_pkt_info[i].n_packets = n_packets;
         /*printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);*/
 
@@ -641,6 +647,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             pos += INT_DATA_N_BYTES_LEN;
         } else {
             n_bytes = 0;
+        }
+        if (switch_type == TOFINO) {
+            n_bytes = 0;    // tofino not supported
         }
         flow_info.cur_pkt_info[i].n_bytes = n_bytes;
         /*printf("ufid:%x, pkt_i:%d, n_bytes: 0x%016lx\n", ufid, i, n_bytes);*/
