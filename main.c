@@ -142,7 +142,7 @@
 /* write data every time interval. */
 #define TIME_INTERVAL_SHOULD_WRITE true
 #define ONE_SECOND_IN_MS           1000000.0   // ms
-#define TIME_WRITE_THRESH          50000.0     // ms
+#define TIME_WRITE_THRESH          200000.0     // ms
 
 /* write data every packet interval. */
 #define PKT_INTERVAL_SHOULD_WRITE  true
@@ -474,7 +474,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /*printf("ufid: 0x%04x\n", ufid);*/
 
     /* used to indicate where to start to parse. */
-    uint8_t pos = INT_HEADER_BASE;
+    uint32_t pos = INT_HEADER_BASE;
 
     /*
      * ===================== REJECT STAGE =======================
@@ -683,7 +683,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /* output result about flow_info. <cur, his> */
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
-#ifndef PRINT_RESULT
+#ifndef PRINT_NODE_RESULT
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
         for (i = 0; i < ttl; i++) {
@@ -695,7 +695,9 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
                    flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
                    flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts);
         }
+#endif
 
+#ifdef PRINT_LINK_RESULT
         /* print link path */
         printf("%d\t %d\t %llu\t ", LINK_PATH, ufid, print_timestamp);
         for (i = 0; i < ttl; i++) {
@@ -717,7 +719,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     if ((end_time - relative_start_time) >= (ONE_SECOND_IN_MS * (sec_cnt+1))) {
         sec_cnt++;
 
-#ifdef PRINT_SECOND_PERFORMANCE
+#ifndef PRINT_SECOND_PERFORMANCE
         /* second + recv_pkt/s + write/s */
         printf("%ds\t %d\t %d\n", sec_cnt, port_recv_int_cnt, write_cnt);
 #endif
