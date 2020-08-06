@@ -46,7 +46,6 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
-
 #include <rte_common.h>
 #include <rte_log.h>
 #include <rte_malloc.h>
@@ -71,14 +70,27 @@
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
-
 #include <sys/time.h>
+#include <pthread.h>
+#include <unistd.h>
+
+#define MAXDATA 125
+//global variable
+double send2Client[MAXDATA];
+pthread_mutex_t mutex;// Create a global mutex
+int print_times = 0;
+bool flag_kjw = true;
+unsigned long long relative_time_kjw_latest = 0;
+int node_data_num = 0;
+uint8_t ttl = 0;
+
 
 /**
  * @author: tsf
  * @created: 2019-06-05
- * @modified: 2020-04-02
+ * @modified: 2020-07-15
  * @desc: convert this app to external DPDK-16.07-based int-collector.
+ *        and support to parse ML-DATA.
  */
 
 /* do not shown dpdk configuration initialization. */
@@ -112,9 +124,11 @@
 #define INT_DATA_N_PACKETS_LEN       8
 #define INT_DATA_N_BYTES_LEN         8
 #define INT_DATA_QUEUE_LEN           4
-#define INT_DATA_FWD_ACTS            4
-
+#define INT_DATA_FWD_ACTS_LEN        4
+#define INT_DATA_BER_LEN             8
 #define INT_TYPE_VAL             0x0908
+#define SOCKET_CLIENT_DATA_PROCESS
+#define PRINT_NODE_RESULT
 
 /* host-byte order <-> network-byte order. */
 #define htonll(_x)    ((1==htonl(1)) ? (_x) : \
@@ -168,6 +182,7 @@ typedef struct {
 //    uint8_t  hops;
 //    uint16_t map_info;    /* bitmap */
 
+    /* IP layer data. */
     uint32_t switch_id;
     uint32_t in_port;
     uint32_t out_port;
@@ -178,6 +193,9 @@ typedef struct {
     uint64_t n_bytes;
     uint32_t queue_len;
     uint32_t fwd_acts;
+
+    /* optical layer data. */
+    double ber;
 
     uint32_t hash;           /* indicate whether to store into files. */
 } int_item_t;
@@ -276,7 +294,7 @@ double start_time = 0, end_time = 0;
 
 /* used for relative timestamp. */
 double relative_time = 0, delta_time = 0;        // write a record with a relative timestamp
-double relative_start_time = 0;                  // when first pkt comes in, timer runs
+unsigned long long relative_start_time = 0;                  // when first pkt comes in, timer runs
 bool first_pkt_in = true;                        // when first pkt comes in, turn 'false'
 
 /* used for INT item. */
@@ -352,6 +370,8 @@ static uint64_t timer_period = 10; /* default period is 10 seconds */
 
 /* Running x second, then automatically quit. used in process_int_pkt() */
 static uint32_t timer_interval = 0;   /* default processing time. 0 means always running. */
+
+static bool SOCK_SHOULD_BE_RUN = false;    /* default false. */
 
 /* Print out statistics on packets dropped */
 static void
@@ -458,6 +478,20 @@ uint32_t bos_bit[2] = {0xffffffff, 0x7fffffff};
 
 flow_info_t flow_info = {0};
 
+#define SERVER_ADDR "192.168.109.229"
+#define SOCKET_PORT 8880
+
+#define MAXLINE  1600
+#define PENDING_QUEUE 10
+#define SLEEP_SECONDS 1
+
+int clientfd = 0;
+char buf_send[MAXLINE] = {0};
+bool send_flag = 0;     // 1, send data; 0, stop sending
+unsigned long long send_times = 0;     // reset for every sock 'accept'
+
+double cur_ber = 0, his_ber = 0;
+
 /* tsf: parse, filter and collect the INT fields. */
 static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint8_t *pkt = dp_packet_data(m);   // packet header
@@ -482,7 +516,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     /* INT type check. */
 #ifdef INT_TYPE_CHECK
     uint16_t type = (pkt[pos++] << 8) + pkt[pos++];
-    uint8_t ttl = pkt[pos++];
+    ttl = pkt[pos++];
 
     /*printf("type: 0x%04x, ttl: %x\n", type, ttl);*/
 
@@ -511,6 +545,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     }
 
     /* port processing packet rate in 1s, clear after per sec. */
+    send_times++;
     port_recv_int_cnt++;
 
     bool time_interval_should_write = false;
@@ -546,8 +581,10 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
     uint64_t n_bytes = 0;
     uint32_t queue_len = 0;
     uint32_t fwd_acts = 0;
+    double ber;
 
     uint32_t switch_type = 0;
+    pthread_mutex_lock(&mutex);//To prevent data from being read while writing
     for (i = 0; i < ttl; i++) {
         if (map_info & 0x1) {
             switch_id = (pkt[pos++] << 24) + (pkt[pos++] << 16) + (pkt[pos++] << 8) + pkt[pos++];
@@ -558,7 +595,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 
 
         flow_info.links[i] = switch_id;
-        /*printf("switch_id: 0x%08x\n", switch_id);*/
+        //printf("switch_id: 0x%08x\n", flow_info.cur_pkt_info[i].switch_id);
 
         /* distinguish switch. */
         if ((0xff000000 & switch_id) == 0x00) {   // device: ovs-pof
@@ -639,7 +676,7 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
             n_packets = 0;    // tofino not supported
         }
         flow_info.cur_pkt_info[i].n_packets = n_packets;
-        /*printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);*/
+        //printf("ufid:%x, pkt_i:%d, n_packets: 0x%016lx\n", ufid, i, n_packets);
 
         if (switch_map_info & (UINT16_C(1)  << 7)) {
             memcpy(&n_bytes, &pkt[pos], INT_DATA_N_BYTES_LEN);
@@ -672,7 +709,17 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
         }
         flow_info.cur_pkt_info[i].fwd_acts = fwd_acts & bos_bit[switch_type];
         /*printf("ufid:%x, pkt_i:%d, fwd_acts: 0x%08x\n", ufid, i, fwd_acts);*/
+
+        if (switch_map_info & (UINT16_C(1)  << 10)) {
+            memcpy(&ber, &pkt[pos], INT_DATA_BER_LEN);
+//            ingress_time = ntohll(ingress_time);
+            pos += INT_DATA_BER_LEN;
+        } else {
+            ber = 0;
+        }
+        flow_info.cur_pkt_info[i].ber = ber;
     }
+     pthread_mutex_unlock(&mutex);//release mutex;
 
     flow_info.links[i] = '\0';
 //    flow_info.start_time = get_flow_start_time(flow_info.his_pkt_info[0].ingress_time,
@@ -681,21 +728,84 @@ static void process_int_pkt(struct rte_mbuf *m, unsigned portid) {
 //            flow_info.cur_pkt_info[ttl-1].ingress_time);  // hop ttl of the link
 
     /* output result about flow_info. <cur, his> */
+
+    unsigned long long end_time_kjw = rp_get_us(); // ePrints packets that can be parsed in one second, Note:Print once a second, otherwise it will affect performance
+    unsigned long long relative_time_kjw = (end_time_kjw - relative_start_time) / ONE_SECOND_IN_MS;
+    //printf("end_time_kjw:%llu\n", relative_time_kjw);
+    if(flag_kjw){
+        relative_time_kjw_latest = 1;
+        flag_kjw = false;
+        printf("kjwkjwkjw, %d\n", flow_info.cur_pkt_info[0].switch_id);
+    }
+    if(relative_time_kjw >= relative_time_kjw_latest){
+        printf("jiexi_times:%llu \t, relative_time_kjw:%llu\t relative_time_kjw_latest:%llu\n", send_times, relative_time_kjw, relative_time_kjw_latest);
+        relative_time_kjw_latest = relative_time_kjw + 1;
+    }
+
     if (time_interval_should_write || pkt_interval_should_write) {
         // TODO: how to output
-#ifndef PRINT_NODE_RESULT
+
         unsigned long long print_timestamp = rp_get_us();
         /* print node's INT info, for each node in links */
+        pthread_mutex_lock(&mutex);//Prevents data from being written while reading
+        int cnt_1 = 0; // count the number of ones in switch_map_info
+        uint16_t temp = switch_map_info;
+
+        while(temp != 0) {
+            cnt_1++;
+            temp = temp & (temp - 1);
+        }
+        //printf("cnt: %d\n", cnt_1);
+        send2Client[0] = switch_map_info;
+        send2Client[1] = cnt_1;
+        send2Client[2] = ttl;
+        send2Client[3] = NODE_INT_INFO;
+        send2Client[4] = ufid;
+        node_data_num = cnt_1;
         for (i = 0; i < ttl; i++) {
-            printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t\n",
+            send2Client[i * node_data_num + 5] = flow_info.cur_pkt_info[i].switch_id;
+            send2Client[i * node_data_num + 6] = flow_info.cur_pkt_info[i].in_port;
+            send2Client[i * node_data_num + 7] = flow_info.cur_pkt_info[i].out_port;
+            send2Client[i * node_data_num + 8] = flow_info.cur_pkt_info[i].ingress_time;
+            send2Client[i * node_data_num + 9] = flow_info.cur_pkt_info[i].hop_latency;
+            send2Client[i * node_data_num + 10] = flow_info.cur_pkt_info[i].bandwidth;
+            send2Client[i * node_data_num + 11] = flow_info.cur_pkt_info[i].n_packets;
+            send2Client[i * node_data_num + 12] = flow_info.cur_pkt_info[i].n_bytes;
+            send2Client[i * node_data_num + 13] = flow_info.cur_pkt_info[i].fwd_acts;
+#ifndef PRINT_NODE_RESULT
+
+            printf("%d\t %d\t %llu\t %d\t %d\t %d\t %ld\t %d\t %f\t %ld\t %ld\t %d\t %d\t %.16g\t %x\t %d\t \n",
                    NODE_INT_INFO, ufid, print_timestamp,
                    flow_info.cur_pkt_info[i].switch_id, flow_info.cur_pkt_info[i].in_port,
                    flow_info.cur_pkt_info[i].out_port, flow_info.cur_pkt_info[i].ingress_time,
                    flow_info.cur_pkt_info[i].hop_latency, flow_info.cur_pkt_info[i].bandwidth,
                    flow_info.cur_pkt_info[i].n_packets, flow_info.cur_pkt_info[i].n_bytes,
-                   flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts);
-        }
+                   flow_info.cur_pkt_info[i].queue_len, flow_info.cur_pkt_info[i].fwd_acts,
+                   flow_info.cur_pkt_info[i].ber, switch_map_info, cnt_1);
 #endif
+
+#ifdef SOCK_DA
+            if (flow_info.cur_pkt_info[i].switch_id != 1) {  // we now only send ber of first hop
+                continue;
+            }
+            cur_ber = flow_info.cur_pkt_info[i].ber;
+
+            if ((cur_ber != his_ber) && (seprintf("server <%s> port <%d>, waiting to be connected ...\n", SERVER_ADDR, SOCKET_PORT);nd_flag)) {
+                memcpy(buf_send, &cur_ber, sizeof(cur_ber));
+                if ((send(clientfd, buf_send, sizeof(cur_ber), 0)) < 0) {
+                    send_flag = 0;
+                    printf("client socket closed.\n");
+                }
+                send_times++;
+                printf("send ber[%d]: %g\n", send_times, cur_ber);
+                his_ber = cur_ber;
+                bzero(buf_send, MAXLINE);
+            }
+#endif
+        }
+        pthread_mutex_unlock(&mutex);//release mutex;
+
+
 
 #ifdef PRINT_LINK_RESULT
         /* print link path */
@@ -760,10 +870,129 @@ l2fwd_simple_forward(struct rte_mbuf *m, unsigned portid)
 		port_statistics[dst_port].tx += sent;
 }
 
+
+//#define SERVER_ADDR "192.168.109.221"
+//#define SOCKET_PORT 2020
+//
+//#define MAXLINE 1024
+//#define PENDING_QUEUE 10
+//#define SLEEP_SECONDS 1
+
+//int clientfd;
+pthread_t tid_sock_recv_thread, tid_sock_send_thread;
+bool BER_TCP_SOCK_CLIENT_RUN_ONCE = true;
+
+/* tsf: tcp sock thread to wait connect <one client at the same time>. */
+static int sock_recv_thread() {
+    int send2client_time = 0;
+
+    printf("1234\n");
+    char buf_recv[MAXLINE] = {0};
+    char buf_send[MAXLINE] = {0};
+
+    int serverfd;
+    if ((serverfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        printf("create socket error.\n");
+        return -1;
+    }
+
+    struct sockaddr_in server;
+    bzero(&server, sizeof(server));
+    server.sin_family = AF_INET;
+    server.sin_port = htons(SOCKET_PORT);
+    server.sin_addr.s_addr = inet_addr(SERVER_ADDR);
+    //inet_pton(AF_INET, SERVER_ADDR, &server.sin_addr);
+
+    if (bind(serverfd, (struct sockaddr *) &server, sizeof(server)) < 0) {
+        printf("bind socket error.\n");
+        return -1;
+    }
+
+    if (listen(serverfd, PENDING_QUEUE) < 0) {
+        printf("listen socket error.\n");
+        return -1;
+    }
+
+    struct sockaddr_in client;
+    socklen_t client_len = sizeof(struct sockaddr);
+    while (true) {
+        printf("server <%s> port <%d>, waiting to be connected ...\n", SERVER_ADDR, SOCKET_PORT);
+
+        clientfd = accept(serverfd, (struct sockaddr *) &client, &client_len);
+        if (clientfd <= 0) {
+            printf("accept error.\n");
+            return -1;
+        }
+
+        printf("accept one client connection.\n");
+        send_flag = 1;
+        unsigned long long relative_start_time1 = rp_get_us();
+        bool flag_kjw1 = true;
+        unsigned long long relative_time_kjw_latest1 = 0;
+#ifdef SOCKET_CLIENT_DATA_PROCESS
+        while(send_flag) {
+//            printf("%f \t, %f \n", send2Client[0], send2Client[1]);
+            memcpy(buf_send, &send2Client, sizeof(send2Client));
+            if ((send(clientfd, buf_send, sizeof(send2Client), 0)) < 0) {
+                send_flag = 0;
+                printf("client socket closed.\n");
+            }
+            //The number of packets sent may be dependent on the rate supported by the Ethernet card
+//            send2client_time++; //Prints packets that can be sented to client in one second, Note:Print once a second, otherwise it will affect performance
+//            unsigned long long end_time_kjw1 = rp_get_us();
+//            unsigned long long relative_time_kjw1 = (end_time_kjw1 - relative_start_time1) / ONE_SECOND_IN_MS;
+//            if(flag_kjw1){
+//                relative_time_kjw_latest1 = 1;
+//                flag_kjw1 = false;
+//                printf("kjw\n");
+//            }
+//            if(relative_time_kjw1 >= relative_time_kjw_latest1){
+//                printf("send2clienttimes:%llu \t, relative_time_kjw:%llu\t relative_time_kjw_latest:%llu\n", send2client_time, relative_time_kjw1, relative_time_kjw_latest1);
+//                relative_time_kjw_latest1 = relative_time_kjw1 + 1;
+//            }
+            bzero(buf_send, MAXLINE);
+            //usleep(900);
+
+        }
+#endif
+//        send_times = 0;
+//        char buf_send[MAXLINE] = {0};
+//        while (send_flag) {
+//            int ttl = 3, ufid = 4, print_timestamp = 5;
+//            send2Client[0] = ttl * 13;
+//            for (i = 0; i < ttl; i++) {
+//                send2Client[i * 3 + 1] = NODE_INT_INFO;
+//                send2Client[i * 3 + 2] = ufid;
+//                send2Client[i * 3 + 3] = print_timestamp;
+//            }
+//            printf("send2Client success.\n");
+//            memcpy(buf_send, &send2Client, sizeof(send2Client));
+//            if ((send(clientfd, buf_send, sizeof(send2Client), 0)) < 0) {
+//                send_flag = 0;
+//                printf("client socket closed.\n");
+//            }
+//            printf("send success\n");
+//            send_times++;
+//            bzero(buf_send, MAXLINE);
+//            double ber = 7.754045171636897e-05;
+//            memcpy(buf_send, &ber, sizeof(ber));
+//            if ((send(clientfd, buf_send, sizeof(ber), 0)) < 0) {
+//                send_flag = 0;
+//                break;
+//            }
+//            send_times++;
+//            sleep(1);
+//            bzero(buf_send, MAXLINE);
+//            printf("server send:%d,  %.16g\n", send_times, ber);
+//        }
+    }
+}
+
 /* main processing loop */
 static void
 l2fwd_main_loop(void)
 {
+    pthread_mutex_init(&mutex, NULL); //initial the mutex;
 	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
 	struct rte_mbuf *m;
 	int sent;
@@ -797,6 +1026,15 @@ l2fwd_main_loop(void)
 	}
 
 	while (!force_quit) {
+
+        if (SOCK_SHOULD_BE_RUN & BER_TCP_SOCK_CLIENT_RUN_ONCE) {
+            int ret = pthread_create(&tid_sock_recv_thread, NULL, (void *) &sock_recv_thread, NULL);
+            if (ret == 0) {
+//                pthread_join(tid_sock_recv_thread, NULL);
+                BER_TCP_SOCK_CLIENT_RUN_ONCE = false;
+                RTE_LOG(INFO, L2FWD, " sock_server_thread start.\n");
+            }
+        }
 
 		cur_tsc = rte_rdtsc();
 
@@ -883,7 +1121,8 @@ l2fwd_usage(const char *prgname)
 	       "  -p PORTMASK: hexadecimal bitmask of ports to configure\n"
 	       "  -q NQ: number of queue (=ports) per lcore (default is 1)\n"
 		   "  -T PERIOD: statistics will be refreshed each PERIOD seconds (0 to disable, 10 default, 86400 maximum)\n"
-           "  -R INTERVAL: running INTERVAL seconds to quit INT packet processing (0 to disable, 15 default, 86400 maximum)\n",
+           "  -R INTERVAL: running INTERVAL seconds to quit INT packet processing (0 to disable, 15 default, 86400 maximum)\n"
+           "  -S SOCKET flag (enter number > 1): run collector as socket server, periodically send data to client (now only support for 'ber')\n",
 	       prgname);
 }
 
@@ -955,11 +1194,27 @@ l2fwd_parse_timer_interval(const char *q_arg)
     return n;
 }
 
+
+static int
+l2fwd_parse_sock_flag(const char *q_arg)
+{
+    char *end = NULL;
+    int n;
+
+    /* parse number string */
+    n = strtol(q_arg, &end, 10);
+    if ((q_arg[0] == '\0') || (end == NULL) || (*end != '\0'))
+        return -1;
+
+    return n;
+}
+
 /* Parse the argument given in the command line of the application */
 static int
 l2fwd_parse_args(int argc, char **argv)
 {
-	int opt, ret, timer_secs;
+	int opt, ret, timer_secs, sock_port;
+	int sock_should_be_run;
 	char **argvopt;
 	int option_index;
 	char *prgname = argv[0];
@@ -969,7 +1224,7 @@ l2fwd_parse_args(int argc, char **argv)
 
 	argvopt = argv;
 
-	while ((opt = getopt_long(argc, argvopt, "p:q:T:R:",
+	while ((opt = getopt_long(argc, argvopt, "p:q:T:R:S:",
 				  lgopts, &option_index)) != EOF) {
 
 		switch (opt) {
@@ -1012,6 +1267,16 @@ l2fwd_parse_args(int argc, char **argv)
                 return -1;
             }
             timer_interval = timer_secs;
+            break;
+
+        case 'S':
+            sock_should_be_run = l2fwd_parse_sock_flag(optarg);
+            if (sock_should_be_run < 0) {
+                printf("sock_should_be_run set failed (enter number > 1)\n");
+                l2fwd_usage(prgname);
+                return -1;
+            }
+            SOCK_SHOULD_BE_RUN = sock_should_be_run;
             break;
 
 		/* long options */
@@ -1107,6 +1372,7 @@ signal_handler(int signum)
 int
 main(int argc, char **argv)
 {
+    pthread_mutex_init(&mutex, NULL); // Initialize the mutex
 	struct lcore_queue_conf *qconf;
 	struct rte_eth_dev_info dev_info;
 	int ret;

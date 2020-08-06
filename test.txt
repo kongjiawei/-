@@ -1,1 +1,55 @@
- 
+EAL: Detected 32 lcore(s)
+EAL: No free hugepages reported in hugepages-1048576kB
+EAL: Probing VFIO support...
+PMD: bnxt_rte_pmd_init() called for (null)
+EAL: PCI device 0000:09:00.0 on NUMA socket 0
+EAL:   probe driver: 8086:37d1 rte_i40e_pmd
+EAL: PCI device 0000:09:00.1 on NUMA socket 0
+EAL:   probe driver: 8086:37d1 rte_i40e_pmd
+EAL: PCI device 0000:09:00.2 on NUMA socket 0
+EAL:   probe driver: 8086:37d1 rte_i40e_pmd
+EAL: PCI device 0000:09:00.3 on NUMA socket 0
+EAL:   probe driver: 8086:37d1 rte_i40e_pmd
+EAL: PCI device 0000:30:00.0 on NUMA socket 0
+EAL:   probe driver: 8086:1572 rte_i40e_pmd
+PMD: eth_i40e_dev_init(): FW 5.40 API 1.5 NVM 05.04.00 eetrack 80002d36
+EAL: PCI device 0000:30:00.1 on NUMA socket 0
+EAL:   probe driver: 8086:1572 rte_i40e_pmd
+EAL: PCI device 0000:30:00.2 on NUMA socket 0
+EAL:   probe driver: 8086:1572 rte_i40e_pmd
+EAL: PCI device 0000:30:00.3 on NUMA socket 0
+EAL:   probe driver: 8086:1572 rte_i40e_pmd
+EAL: PCI device 0000:86:00.0 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:86:00.1 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:86:00.2 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:86:00.3 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:af:00.0 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:af:00.1 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:af:00.2 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+EAL: PCI device 0000:af:00.3 on NUMA socket 1
+EAL:   probe driver: 8086:1521 rte_igb_pmd
+Notice: odd number of ports in portmask.
+Lcore 0: RX port 0
+Initializing port 0... done: 
+Port 0, MAC address: 3C:FD:FE:2E:ED:C0
+
+
+Checking link status........done
+Port 0 Link Up - speed 10000 Mbps - full-duplex
+L2FWD: lcore 1 has nothing to do
+L2FWD: lcore 2 has nothing to do
+L2FWD: entering main loop on lcore 0
+L2FWD:  -- lcoreid=0 portid=0
+L2FWD: lcore 3 has nothing to do
+
+
+Signal 2 received, preparing to exit...
+Closing port 0... Done
+Bye...
